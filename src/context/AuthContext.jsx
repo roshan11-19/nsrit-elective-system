@@ -275,7 +275,7 @@ export function AuthProvider({ children }) {
                 throw new Error(secondSignInErr.message);
               }
             } else {
-              throw new Error(`Incorrect password for ${profile.email}. Default initial password upon enrollment is your Roll Number (${profile.roll_number || 'e.g. 24NU1A0501'}). If you changed your password, use "Forgot / Set Password?".`);
+              throw new Error(`Incorrect password for ${profile.email}. Default initial password upon enrollment is your Roll Number. If you changed your password, use "Forgot / Set Password?".`);
             }
           } else {
             throw new Error(signInError.message || 'Authentication failed. Please verify your credentials.');
@@ -450,7 +450,7 @@ export function AuthProvider({ children }) {
                 throw new Error(secondSignInErr.message);
               }
             } else {
-              throw new Error(`Incorrect coordinator password. Default initial password upon enrollment is your Staff ID (${profile.roll_number || 'e.g. COORD-CSE-01'}). If you changed your password, use "Forgot / Set Password?".`);
+              throw new Error(`Incorrect coordinator password for ${profile.email}. Default initial password upon enrollment is your Roll Number. If you changed your password, use "Forgot / Set Password?".`);
             }
           } else {
             throw new Error(signInError.message || 'Authentication failed.');
