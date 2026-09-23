@@ -18,11 +18,11 @@ export default function AddStudentModal({ isOpen, onClose, onSave, coordinatorBr
     name: '',
     email: '',
     roll_number: '',
-    regulation: 'AR23',
+    regulation: '',
     branch: coordinatorBranch || 'CSE',
-    section: 'A',
+    section: '',
     admitted_batch: '',
-    semester: 5
+    semester: ''
   });
 
   const [loading, setLoading] = useState(false);
@@ -31,10 +31,25 @@ export default function AddStudentModal({ isOpen, onClose, onSave, coordinatorBr
   const [copied, setCopied] = useState(false);
 
   useEffect(() => {
-    setFormData(prev => ({
-      ...prev,
-      branch: coordinatorBranch || 'CSE'
-    }));
+    if (!isOpen) {
+      setFormData({
+        name: '',
+        email: '',
+        roll_number: '',
+        regulation: '',
+        branch: coordinatorBranch || 'CSE',
+        section: '',
+        admitted_batch: '',
+        semester: ''
+      });
+      setEnrolledStudent(null);
+      setError('');
+    } else {
+      setFormData(prev => ({
+        ...prev,
+        branch: coordinatorBranch || 'CSE'
+      }));
+    }
   }, [coordinatorBranch, isOpen]);
 
   const handleSubmit = async (e) => {
@@ -44,9 +59,10 @@ export default function AddStudentModal({ isOpen, onClose, onSave, coordinatorBr
     const cleanEmail = formData.email.trim().toLowerCase();
     const cleanName = formData.name.trim();
     const cleanRoll = formData.roll_number.toUpperCase().replace(/\s+/g, '');
-    const cleanRegulation = (formData.regulation || 'AR23').toUpperCase().replace(/\s+/g, '');
-    const cleanSection = (formData.section || 'A').toUpperCase().replace(/\s+/g, '');
+    const cleanRegulation = (formData.regulation || '').toUpperCase().replace(/\s+/g, '');
+    const cleanSection = (formData.section || '').toUpperCase().replace(/\s+/g, '');
     const cleanBatch = formData.admitted_batch.trim();
+    const cleanSemester = Number(formData.semester);
 
     if (!cleanBatch) {
       setError('Please select or specify an Academic Batch.');
@@ -58,23 +74,28 @@ export default function AddStudentModal({ isOpen, onClose, onSave, coordinatorBr
       return;
     }
 
-    if (!isValidEmail(cleanEmail)) {
-      setError('Please provide a valid college email address (e.g. name@college.edu or student@gmail.com).');
-      return;
-    }
-
     if (!cleanRoll) {
       setError('Please enter the student\'s Roll / Hall Ticket Number.');
       return;
     }
 
-    if (!cleanRegulation) {
-      setError('Please enter the academic Regulation (e.g. AR23).');
+    if (!isValidEmail(cleanEmail)) {
+      setError('Please provide a valid college email address (e.g. name@college.edu or student@gmail.com).');
       return;
     }
 
     if (!cleanSection) {
       setError('Please enter the Class Section (e.g. A, B, C).');
+      return;
+    }
+
+    if (!cleanSemester || cleanSemester < 1 || cleanSemester > 8) {
+      setError('Please select a Semester (1 to 8).');
+      return;
+    }
+
+    if (!cleanRegulation) {
+      setError('Please enter the academic Regulation (e.g. AR23).');
       return;
     }
 
@@ -180,11 +201,11 @@ Nadimpalli Satyanarayana Raju Institute of Technology (NSRIT)`
       name: '',
       email: '',
       roll_number: '',
-      regulation: formData.regulation || 'AR23',
+      regulation: '',
       branch: coordinatorBranch || 'CSE',
-      section: formData.section || 'A',
-      admitted_batch: formData.admitted_batch || '',
-      semester: formData.semester || 5
+      section: '',
+      admitted_batch: '',
+      semester: ''
     });
     setError('');
   };
@@ -364,10 +385,12 @@ Nadimpalli Satyanarayana Raju Institute of Technology (NSRIT)`
                 Semester *
               </label>
               <select
+                required
                 value={formData.semester}
-                onChange={(e) => setFormData({ ...formData, semester: Number(e.target.value) })}
+                onChange={(e) => setFormData({ ...formData, semester: e.target.value ? Number(e.target.value) : '' })}
                 className="w-full px-3 py-2 rounded-xl border border-gray-300 text-xs font-bold bg-white"
               >
+                <option value="">Select Sem...</option>
                 {[1, 2, 3, 4, 5, 6, 7, 8].map(s => (
                   <option key={s} value={s}>Sem {s}</option>
                 ))}

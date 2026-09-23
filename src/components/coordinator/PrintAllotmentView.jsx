@@ -5,10 +5,22 @@ export default function PrintAllotmentView({
   reportType = 'PE',
   title = 'Professional Elective (PE) Allotment Sheet',
   subtitle = 'Academic Year 2024–2025',
-  filters = {}
+  filters = {},
+  currentPage = 1,
+  pageSize = 100,
+  totalRecords = null
 }) {
-  const allottedCount = records.filter(r => r.status === 'ALLOTTED').length;
-  const waitlistedCount = records.filter(r => r.status === 'WAITLISTED').length;
+  const sortedRecords = [...records].sort((a, b) => {
+    const rollA = a.rollNumber || a.roll_number || '';
+    const rollB = b.rollNumber || b.roll_number || '';
+    return rollA.localeCompare(rollB, undefined, { numeric: true, sensitivity: 'base' });
+  });
+
+  const actualTotal = typeof totalRecords === 'number' ? totalRecords : sortedRecords.length;
+  const totalPages = Math.max(1, Math.ceil(actualTotal / pageSize));
+  const startSerial = (currentPage - 1) * pageSize;
+  const allottedCount = sortedRecords.filter(r => r.status === 'ALLOTTED').length;
+  const waitlistedCount = sortedRecords.filter(r => r.status === 'WAITLISTED').length;
 
   const deptDisplay = filters.student_branch && filters.student_branch !== 'ALL' 
     ? `${filters.student_branch} Department` 
@@ -45,7 +57,7 @@ export default function PrintAllotmentView({
         <div className="mt-3 py-2 bg-gray-100 border-y border-black">
           <h2 className="text-base font-extrabold uppercase tracking-wider">{title}</h2>
           <p className="text-xs text-gray-600 font-medium">
-            {subtitle} • Printed on: {new Date().toLocaleString()}
+            {subtitle} • Printed on: {new Date().toLocaleString()} • <strong className="font-mono">Page {currentPage} of {totalPages} (Rows {startSerial + 1}–{startSerial + records.length} of {actualTotal})</strong>
           </p>
         </div>
       </div>
@@ -53,7 +65,7 @@ export default function PrintAllotmentView({
       {/* Summary Row */}
       <div className="grid grid-cols-4 text-xs font-semibold mb-4 px-3 py-2 bg-gray-50 border border-gray-400">
         <div>
-          Total Processed: <strong>{records.length}</strong>
+          Rows on Page: <strong>{records.length}</strong> (Total Filtered: <strong>{actualTotal}</strong>)
         </div>
         <div className="text-center">
           Allotted: <strong className="text-emerald-900">{allottedCount}</strong> | Waitlisted: <strong className="text-amber-900">{waitlistedCount}</strong>
@@ -62,7 +74,7 @@ export default function PrintAllotmentView({
           Department: <strong>{deptDisplay} ({sectionDisplay}{batchDisplay})</strong>
         </div>
         <div className="text-right">
-          Type: <strong>{typeDisplay}</strong>
+          Type: <strong>{typeDisplay}</strong> • <strong>Page {currentPage}/{totalPages}</strong>
         </div>
       </div>
 
@@ -83,19 +95,21 @@ export default function PrintAllotmentView({
           </tr>
         </thead>
         <tbody>
-          {records.map((row, idx) => {
+          {sortedRecords.map((row, idx) => {
             const electiveDisplay = `${row.elective_type || 'PE'}-${row.elective_number || 1}`;
             const subjectLabel = row.status === 'ALLOTTED'
               ? (row.subjectCode && row.subjectCode !== 'N/A' ? `${row.subjectCode} - ${row.subjectName}` : (row.subjectName || 'Allotted'))
               : (row.status === 'WAITLISTED' ? 'WAITLISTED (No Vacancy)' : (row.subjectName || '—'));
 
-            const priorityLabel = row.priority_selected 
-              ? `Priority ${row.priority_selected}` 
-              : (row.status === 'ALLOTTED' ? 'Assigned (Override)' : '—');
+            const priorityLabel = row.is_auto_allocated
+              ? 'Auto Allocated'
+              : (row.priority_selected 
+                ? `Priority ${row.priority_selected}` 
+                : (row.status === 'ALLOTTED' ? 'Assigned (Override)' : '—'));
 
             return (
               <tr key={row.id || idx} className="hover:bg-gray-50">
-                <td className="border border-black px-2 py-1.5 text-center font-mono">{idx + 1}</td>
+                <td className="border border-black px-2 py-1.5 text-center font-mono">{startSerial + idx + 1}</td>
                 <td className="border border-black px-2 py-1.5 text-center font-mono font-bold">{electiveDisplay}</td>
                 <td className="border border-black px-2 py-1.5 font-mono font-bold">{row.rollNumber || 'N/A'}</td>
                 <td className="border border-black px-2 py-1.5 font-semibold">{row.studentName || 'Student'}</td>
@@ -114,7 +128,7 @@ export default function PrintAllotmentView({
               </tr>
             );
           })}
-          {records.length === 0 && (
+          {sortedRecords.length === 0 && (
             <tr>
               <td colSpan="10" className="border border-black py-8 text-center text-gray-500 font-semibold">
                 No allotment records found for the selected filter parameters.

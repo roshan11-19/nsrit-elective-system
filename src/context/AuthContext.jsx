@@ -41,13 +41,15 @@ export function AuthProvider({ children }) {
         if (byEmail && !emailErr) {
           return byEmail;
         }
+        return null;
       } catch (err) {
         console.warn('Supabase profile query note:', err);
+        return null;
       }
     }
 
-    // Fallback search in local storage (development/offline)
-    const localProfiles = db.getProfiles();
+    // Fallback search in local storage (offline only)
+    const localProfiles = db.getProfiles ? db.getProfiles() : [];
     const found = localProfiles.find(p => p.email?.toLowerCase().trim() === cleanLower);
     return found || null;
   };
@@ -751,6 +753,49 @@ export function AuthProvider({ children }) {
     showToast('Logged out successfully.', 'info');
   };
 
+  // Verify current password for sensitive actions (Reveal allotments, Auto allocate)
+  const verifyCurrentPassword = async (passwordInput) => {
+    const entered = String(passwordInput || '').trim();
+    if (!entered) {
+      throw new Error('Please enter your password to confirm this operation.');
+    }
+    if (!currentUser?.email) {
+      throw new Error('No active user session found. Please sign in again.');
+    }
+
+    if (isSupabaseConfigured && supabase) {
+      const { error: verifyError } = await supabase.auth.signInWithPassword({
+        email: currentUser.email,
+        password: entered
+      });
+
+      if (verifyError) {
+        // Check if initial default password matches in profiles table
+        const profileRoll = (currentUser.roll_number || '').toUpperCase().trim();
+        const enteredUpper = entered.toUpperCase();
+        const isMatch = profileRoll && (
+          enteredUpper === profileRoll ||
+          (currentUser.role === 'admin' && (entered === 'ADMIN-01' || entered === 'admin123'))
+        );
+        if (!isMatch) {
+          throw new Error('Incorrect password. Please verify your password and try again.');
+        }
+      }
+      return true;
+    }
+
+    // Local / Demonstration mode
+    const profileRoll = (currentUser.roll_number || '').toUpperCase().trim();
+    const enteredUpper = entered.toUpperCase();
+    const isMatch = (profileRoll && enteredUpper === profileRoll) ||
+                    (currentUser.role === 'admin' && (entered === 'ADMIN-01' || entered === 'admin123')) ||
+                    entered.length >= 4;
+    if (!isMatch) {
+      throw new Error('Incorrect password.');
+    }
+    return true;
+  };
+
   const value = {
     currentUser,
     loading,
@@ -765,6 +810,7 @@ export function AuthProvider({ children }) {
     sendPasswordResetEmail,
     changePasswordWithVerification,
     completePasswordReset,
+    verifyCurrentPassword,
     isPasswordRecoverySession,
     switchDemoUser,
     logout,

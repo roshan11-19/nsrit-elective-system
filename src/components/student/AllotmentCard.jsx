@@ -16,8 +16,10 @@ export default function AllotmentCard({ allotment, profile, electiveType = 'PE' 
     window.print();
   };
 
-  const isAllotted = allotment?.status === 'ALLOTTED';
-  const isWaitlisted = allotment?.status === 'WAITLISTED';
+  const isRevealed = Boolean(allotment?.allotment_revealed);
+  const isAllotted = allotment?.status === 'ALLOTTED' && isRevealed;
+  const isWaitlisted = allotment?.status === 'WAITLISTED' && isRevealed;
+  const isPendingReveal = Boolean(allotment && !isRevealed);
 
   // Robust subject extraction
   const subjectObj = allotment?.subject || (Array.isArray(allotment?.subjects) ? allotment.subjects[0] : allotment?.subjects) || null;
@@ -49,13 +51,20 @@ export default function AllotmentCard({ allotment, profile, electiveType = 'PE' 
           </div>
 
           <div className="no-print">
-            <button
-              onClick={handlePrint}
-              className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-white text-crimson-800 hover:bg-crimson-50 text-xs font-bold shadow-md transition-all active:scale-95"
-            >
-              <Printer className="w-4 h-4" />
-              <span>Print Allotment Slip</span>
-            </button>
+            {isRevealed ? (
+              <button
+                onClick={handlePrint}
+                className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-white text-crimson-800 hover:bg-crimson-50 text-xs font-bold shadow-md transition-all active:scale-95"
+              >
+                <Printer className="w-4 h-4" />
+                <span>Print Allotment Slip</span>
+              </button>
+            ) : (
+              <span className="px-3 py-1.5 rounded-xl bg-white/20 text-white/90 text-xs font-semibold flex items-center gap-1.5 border border-white/20">
+                <Clock className="w-3.5 h-3.5" />
+                <span>Pending Publication</span>
+              </span>
+            )}
           </div>
         </div>
       </div>
@@ -70,6 +79,12 @@ export default function AllotmentCard({ allotment, profile, electiveType = 'PE' 
               Allotment Status
             </span>
             <div className="flex items-center gap-2 mt-1">
+              {isPendingReveal && (
+                <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold bg-amber-100 text-amber-900 border border-amber-300">
+                  <Clock className="w-4 h-4 text-amber-600" />
+                  PREFERENCES SUBMITTED • ALLOTMENT RESULTS PENDING PUBLICATION
+                </span>
+              )}
               {isAllotted && (
                 <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold bg-emerald-100 text-emerald-800 border border-emerald-300">
                   <CheckCircle2 className="w-4 h-4 text-emerald-600" />
@@ -131,6 +146,30 @@ export default function AllotmentCard({ allotment, profile, electiveType = 'PE' 
             </span>
           </div>
         </div>
+
+        {/* Pending Publication Card */}
+        {isPendingReveal && (
+          <div className="p-6 rounded-2xl bg-gradient-to-br from-amber-50 via-white to-amber-50/40 border-2 border-amber-300 shadow-md space-y-3">
+            <div className="flex items-center gap-2">
+              <span className="px-2.5 py-0.5 rounded-full text-[11px] font-black uppercase tracking-wider bg-amber-700 text-white shadow-2xs">
+                Awaiting Official Publication
+              </span>
+              <span className="px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-gray-100 text-gray-800 border border-gray-300">
+                Preferences Locked & Recorded
+              </span>
+            </div>
+            <h3 className="text-xl sm:text-2xl font-black text-gray-900 mt-2 font-display">
+              Official Allotment Results Pending Publication
+            </h3>
+            <p className="text-xs text-gray-600 leading-relaxed max-w-2xl">
+              Your elective priority rankings have been securely registered and processed in first-come, first-served timestamp order. Individual course details and printable allotment memos will be revealed once results are published by the {electiveType === 'PE' ? 'Department Coordinator' : 'Institution Administrator'}.
+            </p>
+            <div className="pt-2 text-[11px] text-gray-500 flex items-center gap-1.5 font-medium">
+              <Clock className="w-3.5 h-3.5 text-amber-600" />
+              <span>Please check back after preference submission concludes.</span>
+            </div>
+          </div>
+        )}
 
         {/* Allotted Subject Highlight */}
         {isAllotted && (

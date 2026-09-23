@@ -46,6 +46,7 @@ export default function ElectiveSelectionPage() {
   const [submittedElectives, setSubmittedElectives] = useState(new Set());
   const [allotmentRecords, setAllotmentRecords] = useState([]);
   const [selectionClosedReason, setSelectionClosedReason] = useState(null);
+  const [selectionWindowInfo, setSelectionWindowInfo] = useState(null);
 
   // Single Elective Confirmation Modal
   const [singleConfirmElective, setSingleConfirmElective] = useState(null);
@@ -86,12 +87,78 @@ export default function ElectiveSelectionPage() {
     return electiveNumbers.every(n => isElectiveLocked(n));
   }, [electiveNumbers, submittedElectives, allotmentRecords, isPastSem]);
 
+  const getElectiveWindowStatus = (eNum) => {
+    const num = Number(eNum);
+    const relevantWins = selectionWindowInfo?.allRelevantWins || [];
+    const win = relevantWins.find(w => Number(w.elective_number || 1) === num);
+
+    if (!win) {
+      const authority = currentType === 'PE' ? 'Department Coordinator' : 'College Administrator';
+      return {
+        isOpen: false,
+        isExpired: false,
+        status: 'NOT_ESTABLISHED',
+        dueDate: null,
+        allotmentRevealed: false,
+        window: null,
+        reason: `Selection drive for ${currentType}-${num} has not been established yet by the ${authority}.`
+      };
+    }
+
+    const isPastDue = Boolean(win.due_date && new Date() > new Date(win.due_date));
+    if (isPastDue) {
+      return {
+        isOpen: false,
+        isExpired: true,
+        status: 'EXPIRED',
+        dueDate: win.due_date,
+        allotmentRevealed: Boolean(win.allotment_revealed),
+        window: win,
+        reason: `The selection deadline for ${currentType}-${num} passed on ${new Date(win.due_date).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })}.`
+      };
+    }
+
+    if (win.status !== 'ACTIVE') {
+      const authority = currentType === 'PE' ? 'Department Coordinator' : 'College Administrator';
+      return {
+        isOpen: false,
+        isExpired: false,
+        status: win.status || 'LOCKED',
+        dueDate: win.due_date,
+        allotmentRevealed: Boolean(win.allotment_revealed),
+        window: win,
+        reason: `Selection drive for ${currentType}-${num} is currently in Setup Phase (LOCKED) by the ${authority}.`
+      };
+    }
+
+    return {
+      isOpen: true,
+      isExpired: false,
+      status: 'ACTIVE',
+      dueDate: win.due_date,
+      allotmentRevealed: Boolean(win.allotment_revealed),
+      window: win,
+      reason: null
+    };
+  };
+
+  const isAllotmentRevealed = useMemo(() => {
+    if (selectionWindowInfo && typeof selectionWindowInfo.allotmentRevealed === 'boolean') {
+      return selectionWindowInfo.allotmentRevealed;
+    }
+    if (allotmentRecords.length > 0) {
+      return Boolean(allotmentRecords.some(a => a.allotment_revealed === true));
+    }
+    return false;
+  }, [selectionWindowInfo, allotmentRecords]);
+
   useEffect(() => {
     async function loadData() {
       if (!currentUser) return;
       try {
         setLoading(true);
         setSelectionClosedReason(null);
+        setSelectionWindowInfo(null);
 
         const studentProfile = {
           ...currentUser,
@@ -100,6 +167,7 @@ export default function ElectiveSelectionPage() {
 
         // 1. Check if selection window is open for this batch & semester
         const windowCheck = await studentService.isSelectionOpen(studentProfile, currentType, selectedSemester);
+        setSelectionWindowInfo(windowCheck);
         if (!windowCheck.isOpen) {
           setSelectionClosedReason(windowCheck.reason);
         }
@@ -340,6 +408,23 @@ export default function ElectiveSelectionPage() {
           </div>
         </div>
 
+        {/* Selection Deadline Notification Banner */}
+        {selectionWindowInfo?.dueDate && !allElectivesLocked && (
+          <div className="p-3.5 bg-blue-50 border border-blue-200 rounded-xl text-xs text-blue-900 flex items-center justify-between gap-3 shadow-2xs">
+            <div className="flex items-center gap-2">
+              <Clock className="w-4 h-4 text-blue-600 flex-shrink-0" />
+              <span>
+                {selectionWindowInfo.activeElectiveNumbers?.length > 0 
+                  ? `Active Selection Drive (${selectionWindowInfo.activeElectiveNumbers.map(n => `${currentType}-${n}`).join(', ')}) Deadline:` 
+                  : 'Selection Deadline:'} <strong>{new Date(selectionWindowInfo.dueDate).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })}</strong>
+              </span>
+            </div>
+            <span className="px-2.5 py-0.5 rounded-md bg-blue-100 text-blue-800 font-bold text-[10px] font-mono">
+              ACTIVE SCHEDULE
+            </span>
+          </div>
+        )}
+
         {/* Locked / Status Banner Notification */}
         {allElectivesLocked ? (
           <div className="p-4 bg-gradient-to-r from-amber-50 to-orange-50/40 border border-amber-300 rounded-xl text-xs text-amber-950 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 shadow-xs">
@@ -349,23 +434,34 @@ export default function ElectiveSelectionPage() {
                 <span className="text-amber-900 text-sm block">
                   {isPastSem
                     ? `Semester ${selectedSemester} Electives (Completed & Archived)`
+                    : !isAllotmentRevealed
+                    ? `Semester ${selectedSemester} Preferences Submitted (Allotment Pending Publication)`
                     : `Semester ${selectedSemester} All Electives Locked`}
                 </span>
                 <span className="font-normal text-amber-800 text-[11px]">
                   {isPastSem
                     ? `This is a completed past semester. Past elective choices are permanently preserved and view-only.`
+                    : !isAllotmentRevealed
+                    ? `Your priority choices across all ${electiveNumbers.length} electives have been securely recorded. Official allotment memos will be published once the drive concludes.`
                     : `Your priority choices across all ${electiveNumbers.length} electives for Semester ${selectedSemester} have been registered and allotted.`}
                 </span>
               </div>
             </div>
 
-            <Link
-              to={`/student/allotment?type=${currentType}&semester=${selectedSemester}`}
-              className="px-4 py-2 rounded-lg bg-white text-crimson-800 font-bold border border-amber-200 shadow-2xs hover:bg-amber-50 transition-colors flex items-center gap-1.5 flex-shrink-0"
-            >
-              <FileCheck className="w-4 h-4" />
-              <span>View Allotment Memo (Sem {selectedSemester})</span>
-            </Link>
+            {isAllotmentRevealed ? (
+              <Link
+                to={`/student/allotment?type=${currentType}&semester=${selectedSemester}`}
+                className="px-4 py-2 rounded-lg bg-white text-crimson-800 font-bold border border-amber-200 shadow-2xs hover:bg-amber-50 transition-colors flex items-center gap-1.5 flex-shrink-0"
+              >
+                <FileCheck className="w-4 h-4" />
+                <span>View Allotment Memo (Sem {selectedSemester})</span>
+              </Link>
+            ) : (
+              <span className="px-3.5 py-2 rounded-lg bg-amber-100 text-amber-900 font-bold border border-amber-300 text-xs flex items-center gap-1.5 flex-shrink-0">
+                <Clock className="w-3.5 h-3.5 text-amber-700" />
+                <span>Pending Publication</span>
+              </span>
+            )}
           </div>
         ) : submittedElectives.size > 0 ? (
           <div className="p-3.5 bg-blue-50 border border-blue-200 rounded-xl text-xs text-blue-900 flex items-center justify-between gap-3">
@@ -386,137 +482,188 @@ export default function ElectiveSelectionPage() {
           <div className="w-10 h-10 border-4 border-crimson-200 border-t-crimson-700 rounded-full animate-spin mx-auto"></div>
           <p className="mt-3 text-xs text-gray-500 font-medium">Loading eligible elective subjects...</p>
         </div>
-      ) : selectionClosedReason ? (
+      ) : (
         <div className="space-y-6">
-          <div className="bg-white rounded-2xl border border-gray-200 shadow-card p-6 sm:p-8 space-y-4">
-            <div className="p-6 rounded-2xl bg-amber-50 border-2 border-amber-300 text-amber-950 space-y-4">
-              <div className="flex items-start gap-3.5">
-                <div className="p-2.5 bg-amber-100 rounded-xl text-amber-800 flex-shrink-0 mt-0.5">
-                  <Lock className="w-6 h-6" />
+          {/* Informative Preview Banner if entire selection is not open */}
+          {selectionClosedReason && !allElectivesLocked && (
+            <div className="p-4 sm:p-5 bg-gradient-to-r from-amber-50 via-orange-50/40 to-amber-50 border border-amber-300 rounded-2xl text-amber-950 shadow-xs space-y-2">
+              <div className="flex items-start gap-3">
+                <div className="p-2 bg-amber-100 rounded-xl text-amber-800 flex-shrink-0 mt-0.5">
+                  <Lock className="w-5 h-5 text-amber-700" />
                 </div>
-                <div className="space-y-1.5">
-                  <h4 className="text-base font-black text-amber-900 font-display">
-                    Elective Selection Drive is Not Yet Active
+                <div className="space-y-0.5">
+                  <h4 className="text-sm font-black text-amber-900 font-display flex items-center gap-2">
+                    <span>Selection Drive Not Active (Preview Mode)</span>
+                    <span className="px-2 py-0.5 text-[10px] uppercase font-mono font-bold bg-amber-200/80 text-amber-900 rounded">
+                      Viewing Only
+                    </span>
                   </h4>
                   <p className="text-xs text-amber-800 leading-relaxed font-medium">
-                    {selectionClosedReason}
+                    {selectionClosedReason} You can review all offered subject details, course codes, and available seats below. Choice submissions will unlock once the selection drive is started.
+                  </p>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {selectedElectiveNumber === null ? (
+            /* ===================================================================== */
+            /* STAGE 1: ELECTIVE CARDS OVERVIEW (PE-1, PE-2, ... OR OE-1, OE-2)      */
+            /* ===================================================================== */
+            <div className="bg-white rounded-2xl border border-gray-200 shadow-card p-6 sm:p-8 space-y-6">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-gray-100 pb-4">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <h3 className="text-lg sm:text-xl font-black text-gray-900 font-display">
+                      Semester {selectedSemester} Elective Offerings
+                    </h3>
+                    <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-crimson-50 text-crimson-700 border border-crimson-200">
+                      {electiveNumbers.length} {currentType === 'PE' ? 'Professional' : 'Open'} Elective{electiveNumbers.length > 1 ? 's' : ''}
+                    </span>
+                  </div>
+                  <p className="text-xs text-gray-500 mt-1">
+                    Click on any elective card below to view subjects, explore curriculum options, and prioritize choices.
                   </p>
                 </div>
               </div>
 
-              <div className="p-4 bg-white/80 rounded-xl border border-amber-200 text-xs text-amber-900">
-                <span className="font-bold block mb-1">Preview of Elective Subjects Added for Your Batch:</span>
-                {eligibleSubjects.length > 0 ? (
-                  <ul className="list-disc list-inside space-y-0.5 text-gray-700">
-                    {eligibleSubjects.map(s => (
-                      <li key={s.id}>
-                        <span className="font-mono font-bold text-crimson-800">
-                          [{s.elective_type}-{s.elective_number || 1}] {s.subject_code}
-                        </span>: {s.subject_name} ({s.seats} seats)
-                      </li>
-                    ))}
-                  </ul>
-                ) : (
-                  <p className="text-gray-500 italic">No subjects uploaded by your department coordinator yet.</p>
-                )}
-              </div>
-            </div>
-          </div>
-        </div>
-      ) : selectedElectiveNumber === null ? (
-        /* ===================================================================== */
-        /* STAGE 1: ELECTIVE CARDS OVERVIEW (PE-1, PE-2, ... OR OE-1, OE-2)      */
-        /* ===================================================================== */
-        <div className="bg-white rounded-2xl border border-gray-200 shadow-card p-6 sm:p-8 space-y-6">
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-gray-100 pb-4">
-            <div>
-              <div className="flex items-center gap-2">
-                <h3 className="text-lg sm:text-xl font-black text-gray-900 font-display">
-                  Semester {selectedSemester} Elective Offerings
-                </h3>
-                <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-crimson-50 text-crimson-700 border border-crimson-200">
-                  {electiveNumbers.length} {currentType === 'PE' ? 'Professional' : 'Open'} Elective{electiveNumbers.length > 1 ? 's' : ''}
-                </span>
-              </div>
-              <p className="text-xs text-gray-500 mt-1">
-                Click on any elective card below to rank subject priorities and save choices individually.
-              </p>
-            </div>
-          </div>
+              {electiveNumbers.length === 0 || eligibleSubjects.length === 0 ? (
+                <div className="p-10 rounded-2xl bg-gray-50 border border-gray-200 text-center space-y-2">
+                  <BookOpen className="w-8 h-8 text-gray-400 mx-auto" />
+                  <h4 className="text-sm font-bold text-gray-800">No Electives Configured</h4>
+                  <p className="text-xs text-gray-500 max-w-md mx-auto">
+                    There are no {currentType === 'PE' ? 'Professional Elective' : 'Open Elective'} subjects configured for Semester {selectedSemester} yet.
+                  </p>
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+                  {electiveNumbers.map((eNum) => {
+                    const isLockedThis = isElectiveLocked(eNum);
+                    const winStatus = getElectiveWindowStatus(eNum);
+                    const eSubs = eligibleSubjects.filter(s => Number(s.elective_number || 1) === eNum);
+                    const ePrefs = prioritiesByElective[eNum] || [];
+                    const eAllot = allotmentRecords.find(a => Number(a.elective_number || a.subjects?.elective_number || 1) === eNum);
+                    const isDriveRevealed = Boolean(winStatus.allotmentRevealed || eAllot?.allotment_revealed);
+                    const isAllotted = eAllot && eAllot.status === 'ALLOTTED' && isDriveRevealed;
+                    const isWaitlisted = eAllot && eAllot.status === 'WAITLISTED' && isDriveRevealed;
+                    const isPendingReveal = isLockedThis && !isDriveRevealed;
 
-          {electiveNumbers.length === 0 || eligibleSubjects.length === 0 ? (
-            <div className="p-10 rounded-2xl bg-gray-50 border border-gray-200 text-center space-y-2">
-              <BookOpen className="w-8 h-8 text-gray-400 mx-auto" />
-              <h4 className="text-sm font-bold text-gray-800">No Electives Configured</h4>
-              <p className="text-xs text-gray-500 max-w-md mx-auto">
-                There are no {currentType === 'PE' ? 'Professional Elective' : 'Open Elective'} subjects configured for Semester {selectedSemester} yet.
-              </p>
-            </div>
-          ) : (
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
-              {electiveNumbers.map((eNum) => {
-                const isLockedThis = isElectiveLocked(eNum);
-                const eSubs = eligibleSubjects.filter(s => Number(s.elective_number || 1) === eNum);
-                const ePrefs = prioritiesByElective[eNum] || [];
-                const eAllot = allotmentRecords.find(a => Number(a.elective_number || a.subjects?.elective_number || 1) === eNum);
-                const isAllotted = eAllot && eAllot.status === 'ALLOTTED';
-                const isWaitlisted = eAllot && eAllot.status === 'WAITLISTED';
-
-                return (
-                  <div
-                    key={eNum}
-                    onClick={() => setSelectedElectiveNumber(eNum)}
-                    className={`bg-white rounded-2xl border-2 transition-all duration-200 p-6 flex flex-col justify-between space-y-5 cursor-pointer group relative overflow-hidden ${
-                      isLockedThis
-                        ? 'border-emerald-200 bg-emerald-50/10 hover:border-emerald-400 hover:shadow-card-hover'
-                        : 'border-gray-200 hover:border-crimson-400 hover:shadow-card-hover'
-                    }`}
-                  >
-                    {/* Top row */}
-                    <div className="space-y-3">
-                      <div className="flex items-center justify-between">
-                        <span className="px-3 py-1 rounded-xl bg-crimson-50 text-crimson-700 font-mono font-black text-xs border border-crimson-200 flex items-center gap-1.5">
-                          {currentType === 'PE' ? <BookOpen className="w-3.5 h-3.5" /> : <Globe className="w-3.5 h-3.5" />}
-                          {currentType}-{eNum}
-                        </span>
-
-                        {isLockedThis ? (
-                          isAllotted ? (
-                            <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-emerald-100 text-emerald-800 border border-emerald-300 flex items-center gap-1">
-                              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
-                              <span>Seat Allotted</span>
+                    return (
+                      <div
+                        key={eNum}
+                        onClick={() => setSelectedElectiveNumber(eNum)}
+                        className={`bg-white rounded-2xl border-2 transition-all duration-200 p-6 flex flex-col justify-between space-y-5 cursor-pointer group relative overflow-hidden ${
+                          isLockedThis
+                            ? isDriveRevealed
+                              ? 'border-emerald-200 bg-emerald-50/10 hover:border-emerald-400 hover:shadow-card-hover'
+                              : 'border-amber-200 bg-amber-50/10 hover:border-amber-400 hover:shadow-card-hover'
+                            : !winStatus.isOpen
+                            ? 'border-gray-200 bg-gray-50/30 hover:border-amber-400 hover:shadow-card-hover'
+                            : 'border-emerald-200 hover:border-crimson-400 hover:shadow-card-hover'
+                        }`}
+                      >
+                        {/* Top row */}
+                        <div className="space-y-3">
+                          <div className="flex items-center justify-between">
+                            <span className="px-3 py-1 rounded-xl bg-crimson-50 text-crimson-700 font-mono font-black text-xs border border-crimson-200 flex items-center gap-1.5">
+                              {currentType === 'PE' ? <BookOpen className="w-3.5 h-3.5" /> : <Globe className="w-3.5 h-3.5" />}
+                              {currentType}-{eNum}
                             </span>
-                          ) : isWaitlisted ? (
-                            <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-amber-100 text-amber-800 border border-amber-300">
-                              Waitlisted
-                            </span>
-                          ) : (
-                            <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-gray-100 text-gray-700">
-                              Locked
-                            </span>
-                          )
-                        ) : ePrefs.length > 0 ? (
-                          <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-blue-50 text-blue-800 border border-blue-200 flex items-center gap-1">
-                            <Sparkles className="w-3.5 h-3.5 text-blue-600" />
-                            <span>{ePrefs.length} Choices Arranged</span>
-                          </span>
-                        ) : (
-                          <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-crimson-50 text-crimson-700 border border-crimson-200">
-                            Ready to Select
-                          </span>
-                        )}
-                      </div>
 
-                      <div>
-                        <h4 className="text-lg font-black text-gray-900 font-display group-hover:text-crimson-700 transition-colors">
-                          {currentType === 'PE' ? `Professional Elective ${eNum}` : `Open Elective ${eNum}`}
-                        </h4>
-                        <p className="text-xs text-gray-500 mt-0.5">
-                          {currentType === 'PE' 
-                            ? `Department specialized elective for ${currentUser?.branch || 'CSE'} students.`
-                            : `Interdisciplinary elective offered across college departments.`}
-                        </p>
-                      </div>
+                            {isLockedThis ? (
+                              isAllotted ? (
+                                <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-emerald-100 text-emerald-800 border border-emerald-300 flex items-center gap-1">
+                                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
+                                  <span>Seat Allotted</span>
+                                </span>
+                              ) : isWaitlisted ? (
+                                <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-amber-100 text-amber-800 border border-amber-300">
+                                  Waitlisted
+                                </span>
+                              ) : isPendingReveal ? (
+                                <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-amber-50 text-amber-900 border border-amber-300 flex items-center gap-1">
+                                  <Clock className="w-3.5 h-3.5 text-amber-600" />
+                                  <span>Preferences Submitted (Results Hidden)</span>
+                                </span>
+                              ) : (
+                                <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-gray-100 text-gray-700">
+                                  Locked
+                                </span>
+                              )
+                            ) : !winStatus.isOpen ? (
+                              <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-amber-50 text-amber-800 border border-amber-200 flex items-center gap-1">
+                                <Lock className="w-3 h-3 text-amber-600" />
+                                <span>Setup Phase (Locked / Inactive)</span>
+                              </span>
+                            ) : ePrefs.length > 0 ? (
+                              <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-blue-50 text-blue-800 border border-blue-200 flex items-center gap-1">
+                                <Sparkles className="w-3.5 h-3.5 text-blue-600" />
+                                <span>{ePrefs.length} Choices Arranged</span>
+                              </span>
+                            ) : (
+                              <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-emerald-50 text-emerald-700 border border-emerald-200 flex items-center gap-1">
+                                <Sparkles className="w-3 h-3 text-emerald-600" />
+                                <span>Selection Active</span>
+                              </span>
+                            )}
+                          </div>
+
+                          <div>
+                            <h4 className="text-lg font-black text-gray-900 font-display group-hover:text-crimson-700 transition-colors">
+                              {currentType === 'PE' ? `Professional Elective ${eNum}` : `Open Elective ${eNum}`}
+                            </h4>
+                            <p className="text-xs text-gray-500 mt-0.5">
+                              {currentType === 'PE' 
+                                ? `Department specialized elective for ${currentUser?.branch || 'CSE'} students.`
+                                : `Interdisciplinary elective offered across college departments.`}
+                            </p>
+                          </div>
+
+                          {/* Individual Elective Slot Deadline Box */}
+                          <div className={`p-3 rounded-xl border flex items-center justify-between text-xs gap-2 ${
+                            winStatus.dueDate
+                              ? winStatus.isExpired
+                                ? 'bg-rose-50/90 border-rose-200 text-rose-950'
+                                : winStatus.isOpen
+                                ? 'bg-blue-50/90 border-blue-200 text-blue-950'
+                                : 'bg-amber-50/80 border-amber-200 text-amber-950'
+                              : 'bg-gray-50 border-gray-200 text-gray-600'
+                          }`}>
+                            <div className="flex items-center gap-2 truncate">
+                              <Clock className={`w-4 h-4 flex-shrink-0 ${
+                                winStatus.dueDate
+                                  ? winStatus.isExpired
+                                    ? 'text-rose-600'
+                                    : winStatus.isOpen
+                                    ? 'text-blue-600'
+                                    : 'text-amber-600'
+                                  : 'text-gray-400'
+                              }`} />
+                              <span className="truncate">
+                                {winStatus.dueDate ? (
+                                  <>
+                                    <strong>{currentType}-{eNum} Deadline:</strong>{' '}
+                                    {new Date(winStatus.dueDate).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })}
+                                  </>
+                                ) : (
+                                  <>
+                                    <strong>{currentType}-{eNum} Deadline:</strong> Schedule Pending Setup
+                                  </>
+                                )}
+                              </span>
+                            </div>
+                            <span className={`px-2 py-0.5 rounded font-mono font-bold text-[10px] uppercase flex-shrink-0 ${
+                              winStatus.dueDate
+                                ? winStatus.isExpired
+                                  ? 'bg-rose-100 text-rose-800'
+                                  : winStatus.isOpen
+                                  ? 'bg-blue-100 text-blue-800'
+                                  : 'bg-amber-100 text-amber-800'
+                                : 'bg-gray-200 text-gray-700'
+                            }`}>
+                              {winStatus.dueDate ? (winStatus.isExpired ? 'Expired' : winStatus.isOpen ? 'Active' : 'Locked') : 'Not Set'}
+                            </span>
+                          </div>
 
                       {/* Subject choices summary */}
                       <div className="p-3.5 bg-gray-50 rounded-xl border border-gray-100 space-y-2">
@@ -527,7 +674,7 @@ export default function ElectiveSelectionPage() {
 
                         <div className="space-y-1.5 max-h-36 overflow-y-auto pr-1">
                           {eSubs.map((s) => {
-                            const isThisAllotted = eAllot?.subject_id === s.id;
+                            const isThisAllotted = isDriveRevealed && eAllot?.subject_id === s.id && eAllot?.status === 'ALLOTTED';
                             const prefRank = ePrefs.findIndex(p => p.subject_id === s.id);
 
                             return (
@@ -543,6 +690,11 @@ export default function ElectiveSelectionPage() {
                                   <span className="font-mono text-[10px] font-bold text-crimson-700 bg-crimson-50 px-1.5 py-0.5 rounded">
                                     {s.subject_code}
                                   </span>
+                                  {s.branch && currentType === 'OE' && (
+                                    <span className="font-mono text-[9px] font-bold text-purple-700 bg-purple-50 px-1.5 py-0.5 rounded border border-purple-200 flex-shrink-0">
+                                      {s.branch}
+                                    </span>
+                                  )}
                                   <span className="truncate">{s.subject_name}</span>
                                 </div>
                                 
@@ -573,7 +725,7 @@ export default function ElectiveSelectionPage() {
                       </span>
                       
                       <div className="inline-flex items-center gap-1.5 text-xs font-bold text-crimson-700 group-hover:translate-x-1 transition-transform">
-                        <span>{isLockedThis ? 'View Choices & Allotment' : 'Show Subjects & Prioritize'}</span>
+                        <span>{isLockedThis ? (isDriveRevealed ? 'View Choices & Allotment' : 'View Submitted Priorities') : !winStatus.isOpen ? 'View Offered Subjects (Preview Mode)' : 'Show Subjects & Prioritize'}</span>
                         <ArrowRight className="w-4 h-4" />
                       </div>
                     </div>
@@ -620,19 +772,26 @@ export default function ElectiveSelectionPage() {
               <div className="flex flex-wrap items-center gap-1.5 p-1 bg-gray-100 rounded-xl border border-gray-200">
                 {electiveNumbers.map(n => {
                   const locked = isElectiveLocked(n);
+                  const winStat = getElectiveWindowStatus(n);
                   return (
                     <button
                       key={n}
                       type="button"
                       onClick={() => setSelectedElectiveNumber(n)}
-                      className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1 ${
+                      className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 ${
                         activeElectiveNumber === n
                           ? 'bg-white text-crimson-700 shadow-2xs font-extrabold'
                           : 'text-gray-600 hover:text-gray-900'
                       }`}
                     >
                       <span>{currentType}-{n}</span>
-                      {locked && <Lock className="w-3 h-3 text-amber-600" />}
+                      {locked ? (
+                        <Check className="w-3 h-3 text-emerald-600" />
+                      ) : !winStat.isOpen ? (
+                        <Lock className="w-3 h-3 text-amber-600" />
+                      ) : (
+                        <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+                      )}
                     </button>
                   );
                 })}
@@ -642,33 +801,46 @@ export default function ElectiveSelectionPage() {
 
           {/* If Locked, render locked list for this elective; otherwise render PrioritySelector */}
           {isElectiveLocked(activeElectiveNumber) ? (
-            <div className="bg-white rounded-2xl border border-gray-200 shadow-card p-6 sm:p-8 space-y-6">
-              <div className="flex items-center justify-between border-b border-gray-100 pb-4">
-                <div>
-                  <h3 className="text-lg font-bold text-gray-900 font-display">
-                    Official Submitted Priorities & Allotment ({currentType}-{activeElectiveNumber})
-                  </h3>
-                  <p className="text-xs text-gray-500">
-                    Your elective preferences for {getElectiveTitle(activeElectiveNumber)} have been processed by the FIFO engine.
-                  </p>
-                </div>
+            (() => {
+              const activeWinStatus = getElectiveWindowStatus(activeElectiveNumber);
+              const ePrefs = prioritiesByElective[activeElectiveNumber] || [];
+              const eAllot = allotmentRecords.find(a => Number(a.elective_number || a.subjects?.elective_number || 1) === activeElectiveNumber);
+              const isStage2Revealed = Boolean(activeWinStatus.allotmentRevealed || eAllot?.allotment_revealed);
 
-                <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-100 text-emerald-800 text-xs font-bold border border-emerald-300">
-                  <CheckCircle2 className="w-4 h-4 text-emerald-600" />
-                  <span>Allotment Processed</span>
-                </span>
-              </div>
+              return (
+                <div className="bg-white rounded-2xl border border-gray-200 shadow-card p-6 sm:p-8 space-y-6">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-gray-100 pb-4">
+                    <div>
+                      <h3 className="text-lg font-bold text-gray-900 font-display">
+                        {isStage2Revealed 
+                          ? `Official Submitted Priorities & Allotment (${currentType}-{activeElectiveNumber})`
+                          : `Official Submitted Priorities (${currentType}-{activeElectiveNumber})`}
+                      </h3>
+                      <p className="text-xs text-gray-500 mt-0.5">
+                        {isStage2Revealed
+                          ? `Your elective preferences for ${getElectiveTitle(activeElectiveNumber)} have been processed by the FIFO engine.`
+                          : `Your elective preferences for ${getElectiveTitle(activeElectiveNumber)} have been registered and locked. Allotment results are pending publication by the ${currentType === 'PE' ? 'Department Coordinator' : 'College Administrator'}.`}
+                      </p>
+                    </div>
 
-              {(() => {
-                const ePrefs = prioritiesByElective[activeElectiveNumber] || [];
-                const eAllot = allotmentRecords.find(a => Number(a.elective_number || a.subjects?.elective_number || 1) === activeElectiveNumber);
+                    {isStage2Revealed ? (
+                      <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-100 text-emerald-800 text-xs font-bold border border-emerald-300">
+                        <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+                        <span>Allotment Processed</span>
+                      </span>
+                    ) : (
+                      <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-amber-50 text-amber-900 text-xs font-bold border border-amber-300">
+                        <Clock className="w-4 h-4 text-amber-600" />
+                        <span>Priorities Submitted (Results Hidden)</span>
+                      </span>
+                    )}
+                  </div>
 
-                return (
                   <div className="space-y-3">
                     {ePrefs.map((item, idx) => {
                       const subj = currentElectiveSubjects.find(s => s.id === item.subject_id) || eligibleSubjects.find(s => s.id === item.subject_id);
                       if (!subj) return null;
-                      const isAllottedThis = eAllot?.subject_id === subj.id;
+                      const isAllottedThis = isStage2Revealed && eAllot?.subject_id === subj.id && eAllot?.status === 'ALLOTTED';
 
                       return (
                         <div
@@ -690,6 +862,11 @@ export default function ElectiveSelectionPage() {
                                 <span className="text-[10px] font-mono font-bold uppercase bg-gray-100 px-2 py-0.5 rounded text-gray-700">
                                   {subj.subject_code}
                                 </span>
+                                {subj.branch && currentType === 'OE' && (
+                                  <span className="font-mono text-[9px] font-bold text-purple-700 bg-purple-50 px-1.5 py-0.5 rounded border border-purple-200">
+                                    Dept: {subj.branch}
+                                  </span>
+                                )}
                                 <span className="text-xs font-bold text-gray-600">Priority {idx + 1}</span>
                               </div>
                               <h5 className="text-sm font-bold text-gray-900 mt-0.5">{subj.subject_name}</h5>
@@ -706,28 +883,35 @@ export default function ElectiveSelectionPage() {
                       );
                     })}
                   </div>
-                );
-              })()}
 
-              <div className="pt-4 border-t border-gray-100 flex items-center justify-between">
-                <button
-                  type="button"
-                  onClick={() => setSelectedElectiveNumber(null)}
-                  className="px-4 py-2 rounded-xl border border-gray-300 text-xs font-bold text-gray-700 hover:bg-gray-50 flex items-center gap-1.5 cursor-pointer"
-                >
-                  <ArrowLeft className="w-4 h-4" />
-                  <span>← Back to All Elective Cards</span>
-                </button>
+                  <div className="pt-4 border-t border-gray-100 flex items-center justify-between">
+                    <button
+                      type="button"
+                      onClick={() => setSelectedElectiveNumber(null)}
+                      className="px-4 py-2 rounded-xl border border-gray-300 text-xs font-bold text-gray-700 hover:bg-gray-50 flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <ArrowLeft className="w-4 h-4" />
+                      <span>← Back to All Elective Cards</span>
+                    </button>
 
-                <Link
-                  to={`/student/allotment?type=${currentType}&semester=${selectedSemester}`}
-                  className="px-5 py-2 rounded-xl text-xs font-bold text-white crimson-gradient-btn flex items-center gap-1.5 shadow-sm"
-                >
-                  <FileCheck className="w-4 h-4" />
-                  <span>View Official Memo</span>
-                </Link>
-              </div>
-            </div>
+                    {isStage2Revealed ? (
+                      <Link
+                        to={`/student/allotment?type=${currentType}&semester=${selectedSemester}`}
+                        className="px-5 py-2 rounded-xl text-xs font-bold text-white crimson-gradient-btn flex items-center gap-1.5 shadow-sm"
+                      >
+                        <FileCheck className="w-4 h-4" />
+                        <span>View Official Memo</span>
+                      </Link>
+                    ) : (
+                      <div className="inline-flex items-center gap-1.5 text-xs font-semibold text-amber-800 bg-amber-50 px-3 py-1.5 rounded-xl border border-amber-200">
+                        <Clock className="w-3.5 h-3.5 text-amber-600" />
+                        <span>Allotment publication pending by {currentType === 'PE' ? 'Coordinator' : 'Administrator'}</span>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              );
+            })()
           ) : (
             <div className="bg-white rounded-2xl border border-gray-200 shadow-card p-6 sm:p-8 space-y-6">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-gradient-to-r from-crimson-50/60 to-purple-50/40 p-4 rounded-xl border border-crimson-100">
@@ -745,6 +929,80 @@ export default function ElectiveSelectionPage() {
                   </p>
                 </div>
               </div>
+
+              {/* Dedicated Active Elective Deadline Banner */}
+              {(() => {
+                const activeWinStatus = getElectiveWindowStatus(activeElectiveNumber);
+                return (
+                  <div className={`p-4 rounded-xl border flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs shadow-2xs ${
+                    activeWinStatus.dueDate
+                      ? activeWinStatus.isExpired
+                        ? 'bg-rose-50 border-rose-200 text-rose-950'
+                        : activeWinStatus.isOpen
+                        ? 'bg-blue-50 border-blue-200 text-blue-950'
+                        : 'bg-amber-50 border-amber-200 text-amber-950'
+                      : 'bg-gray-50 border-gray-200 text-gray-700'
+                  }`}>
+                    <div className="flex items-center gap-2.5">
+                      <div className={`p-2 rounded-lg flex-shrink-0 ${
+                        activeWinStatus.dueDate
+                          ? activeWinStatus.isExpired
+                            ? 'bg-rose-100 text-rose-700'
+                            : activeWinStatus.isOpen
+                            ? 'bg-blue-100 text-blue-700'
+                            : 'bg-amber-100 text-amber-700'
+                          : 'bg-gray-200 text-gray-600'
+                      }`}>
+                        <Clock className="w-4 h-4" />
+                      </div>
+                      <div>
+                        <span className="font-bold block text-sm">
+                          {currentType}-{activeElectiveNumber} Selection Deadline
+                        </span>
+                        <span className="text-[11px] opacity-90">
+                          {activeWinStatus.dueDate
+                            ? `Preferences must be submitted before ${new Date(activeWinStatus.dueDate).toLocaleString([], { dateStyle: 'full', timeStyle: 'short' })}`
+                            : `Selection schedule has not been finalized yet for ${getElectiveTitle(activeElectiveNumber)}.`}
+                        </span>
+                      </div>
+                    </div>
+                    <span className={`px-3 py-1 rounded-lg font-mono font-bold text-xs uppercase self-start sm:self-auto ${
+                      activeWinStatus.dueDate
+                        ? activeWinStatus.isExpired
+                          ? 'bg-rose-200/80 text-rose-900 border border-rose-300'
+                          : activeWinStatus.isOpen
+                          ? 'bg-blue-200/80 text-blue-900 border border-blue-300'
+                          : 'bg-amber-200/80 text-amber-900 border border-amber-300'
+                        : 'bg-gray-200 text-gray-800'
+                    }`}>
+                      {activeWinStatus.dueDate ? (activeWinStatus.isExpired ? 'DEADLINE EXPIRED' : activeWinStatus.isOpen ? 'ACTIVE SCHEDULE' : 'DRIVE LOCKED') : 'SETUP PHASE'}
+                    </span>
+                  </div>
+                );
+              })()}
+
+              {/* Per-elective status banner */}
+              {(() => {
+                const activeWinStatus = getElectiveWindowStatus(activeElectiveNumber);
+                if (!activeWinStatus.isOpen) {
+                  return (
+                    <div className="p-4 rounded-xl bg-amber-50 border border-amber-300 text-amber-950 text-xs flex items-start gap-3 shadow-2xs">
+                      <div className="p-2 bg-amber-100 rounded-lg text-amber-800 flex-shrink-0">
+                        <Lock className="w-4 h-4 text-amber-700" />
+                      </div>
+                      <div className="space-y-0.5">
+                        <span className="font-black text-amber-900 text-xs block">
+                          {currentType}-{activeElectiveNumber} Drive Inactive (Preview Mode)
+                        </span>
+                        <p className="leading-relaxed text-amber-800 text-[11px]">
+                          {activeWinStatus.reason} You can explore and arrange your subject choices now, but choice locking & submission will unlock only when the {currentType === 'PE' ? 'Department Coordinator' : 'College Administrator'} starts the selection drive for {currentType}-{activeElectiveNumber}.
+                        </p>
+                      </div>
+                    </div>
+                  );
+                }
+                return null;
+              })()}
 
               {/* Priority Selector for the Active Elective */}
               <PrioritySelector
@@ -783,20 +1041,40 @@ export default function ElectiveSelectionPage() {
                   })()}
                 </div>
 
-                {/* Individual Save & Lock Button */}
-                <button
-                  type="button"
-                  onClick={() => setSingleConfirmElective(activeElectiveNumber)}
-                  className="w-full sm:w-auto px-8 py-3.5 rounded-xl text-sm font-bold text-white crimson-gradient-btn flex items-center justify-center gap-2 shadow-md shadow-crimson-700/20 cursor-pointer"
-                >
-                  <Send className="w-4 h-4" />
-                  <span>Save & Lock {currentType}-{activeElectiveNumber} Priorities</span>
-                </button>
+                {/* Individual Save & Lock Button based on active elective's window status */}
+                {(() => {
+                  const activeWinStatus = getElectiveWindowStatus(activeElectiveNumber);
+                  if (!activeWinStatus.isOpen) {
+                    return (
+                      <button
+                        type="button"
+                        disabled
+                        className="w-full sm:w-auto px-8 py-3.5 rounded-xl text-sm font-bold text-gray-500 bg-gray-100 border border-gray-300 flex items-center justify-center gap-2 cursor-not-allowed opacity-80"
+                        title={`Selection drive for ${currentType}-${activeElectiveNumber} has not been started yet. Submissions are disabled.`}
+                      >
+                        <Lock className="w-4 h-4 text-gray-500" />
+                        <span>Submissions Locked ({currentType}-{activeElectiveNumber} Drive Not Started)</span>
+                      </button>
+                    );
+                  }
+                  return (
+                    <button
+                      type="button"
+                      onClick={() => setSingleConfirmElective(activeElectiveNumber)}
+                      className="w-full sm:w-auto px-8 py-3.5 rounded-xl text-sm font-bold text-white crimson-gradient-btn flex items-center justify-center gap-2 shadow-md shadow-crimson-700/20 cursor-pointer"
+                    >
+                      <Send className="w-4 h-4" />
+                      <span>Save & Lock {currentType}-{activeElectiveNumber} Priorities</span>
+                    </button>
+                  );
+                })()}
               </div>
             </div>
           )}
         </div>
       )}
+    </div>
+  )}
 
       {/* Single Elective Confirmation Modal */}
       {singleConfirmElective !== null && (

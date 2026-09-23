@@ -1,7 +1,8 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import Modal from '../common/Modal';
 import { BookOpen, Globe, Layers, AlertCircle } from 'lucide-react';
-import { normalizeBatch } from '../../lib/storage';
+import { normalizeBatch, parseOfferedBranches, normalizeBranchName } from '../../lib/storage';
+import { coordinatorService } from '../../services/coordinatorService';
 
 export default function CurriculumSubjectModal({
   isOpen,
@@ -12,15 +13,42 @@ export default function CurriculumSubjectModal({
   registeredBranches = [],
   defaultBatch = ''
 }) {
+  const currentBranch = coordinatorBranch || 'CSE';
+  const [dbBranches, setDbBranches] = useState([]);
+
+  useEffect(() => {
+    async function loadBranches() {
+      if (!isOpen) return;
+      try {
+        const branches = await coordinatorService.getDepartments();
+        if (branches && branches.length > 0) {
+          setDbBranches(branches);
+        }
+      } catch (e) {
+        console.warn('Load branches note:', e);
+      }
+    }
+    loadBranches();
+  }, [isOpen]);
+
+  const availableTargetBranches = useMemo(() => {
+    const merged = Array.from(new Set([
+      ...(registeredBranches || []),
+      ...(dbBranches || [])
+    ]));
+    return merged.filter(b => normalizeBranchName(b) !== normalizeBranchName(currentBranch));
+  }, [registeredBranches, dbBranches, currentBranch]);
+
   const [formData, setFormData] = useState({
-    batch: defaultBatch || '',
-    branch: coordinatorBranch,
-    regulation: 'AR23',
-    semester: 5,
+    batch: '',
+    branch: currentBranch,
+    regulation: '',
+    semester: '',
     elective_type: 'PE',
     elective_number: 1,
     subject_code: '',
-    subject_name: ''
+    subject_name: '',
+    offered_branches: [currentBranch]
   });
 
   const [loading, setLoading] = useState(false);
@@ -28,27 +56,31 @@ export default function CurriculumSubjectModal({
 
   useEffect(() => {
     if (!isOpen) return;
+    const currBranch = coordinatorBranch || 'CSE';
     if (editingSubject) {
+      const eType = editingSubject.elective_type || 'PE';
       setFormData({
         batch: normalizeBatch(editingSubject.batch || defaultBatch || ''),
-        branch: editingSubject.branch || coordinatorBranch,
-        regulation: editingSubject.regulation || 'AR23',
-        semester: Number(editingSubject.semester || 5),
-        elective_type: editingSubject.elective_type || 'PE',
+        branch: editingSubject.branch || currBranch,
+        regulation: editingSubject.regulation || '',
+        semester: editingSubject.semester !== undefined && editingSubject.semester !== '' ? Number(editingSubject.semester) : '',
+        elective_type: eType,
         elective_number: Number(editingSubject.elective_number || 1),
         subject_code: editingSubject.subject_code || '',
-        subject_name: editingSubject.subject_name || ''
+        subject_name: editingSubject.subject_name || '',
+        offered_branches: parseOfferedBranches(editingSubject.offered_branches, eType === 'OE' ? ['ALL'] : [currBranch])
       });
     } else {
       setFormData({
-        batch: defaultBatch || '',
-        branch: coordinatorBranch,
-        regulation: 'AR23',
-        semester: 5,
+        batch: '',
+        branch: currBranch,
+        regulation: '',
+        semester: '',
         elective_type: 'PE',
         elective_number: 1,
         subject_code: '',
-        subject_name: ''
+        subject_name: '',
+        offered_branches: [currBranch]
       });
     }
     setError('');
@@ -61,9 +93,20 @@ export default function CurriculumSubjectModal({
     const cleanCode = String(formData.subject_code || '').trim().toUpperCase().replace(/\s+/g, '');
     const cleanName = String(formData.subject_name || '').trim();
     const cleanBatch = normalizeBatch(formData.batch);
+    const cleanRegulation = String(formData.regulation || '').trim().toUpperCase();
 
     if (!cleanBatch) {
       setError('Please provide the Target Academic Batch.');
+      return;
+    }
+
+    if (!cleanRegulation) {
+      setError('Please enter the Regulation (e.g. AR23).');
+      return;
+    }
+
+    if (formData.semester === '' || isNaN(Number(formData.semester))) {
+      setError('Please select the Target Semester.');
       return;
     }
 
@@ -74,13 +117,20 @@ export default function CurriculumSubjectModal({
 
     try {
       setLoading(true);
+      const cleanOfferingBranch = coordinatorBranch || formData.branch || 'CSE';
       await onSave({
         ...formData,
         batch: cleanBatch,
+        branch: cleanOfferingBranch,
+        regulation: cleanRegulation,
         subject_code: cleanCode,
         subject_name: cleanName,
         semester: Number(formData.semester),
-        elective_number: Number(formData.elective_number)
+        elective_number: Number(formData.elective_number),
+        offered_branches: parseOfferedBranches(
+          formData.offered_branches,
+          formData.elective_type === 'OE' ? ['ALL'] : [cleanOfferingBranch]
+        )
       });
       onClose();
     } catch (err) {
@@ -91,9 +141,6 @@ export default function CurriculumSubjectModal({
   };
 
   const isOE = formData.elective_type === 'OE';
-  const availableTargetBranches = (registeredBranches && registeredBranches.length > 0)
-    ? registeredBranches.filter(b => b.toUpperCase() !== String(coordinatorBranch).toUpperCase())
-    : ['ECE', 'MECH', 'CIVIL', 'EEE', 'AIML', 'IT'];
 
   return (
     <Modal
@@ -119,7 +166,7 @@ export default function CurriculumSubjectModal({
             <input
               type="text"
               required
-              placeholder="e.g. 2024-2028"
+              placeholder="e.g. 2025-2029"
               value={formData.batch}
               onChange={(e) => setFormData({ ...formData, batch: e.target.value })}
               onBlur={(e) => setFormData({ ...formData, batch: normalizeBatch(e.target.value) })}
@@ -150,9 +197,10 @@ export default function CurriculumSubjectModal({
             </label>
             <select
               value={formData.semester}
-              onChange={(e) => setFormData({ ...formData, semester: Number(e.target.value) })}
-              className="w-full px-3 py-2.5 rounded-xl border border-gray-300 text-xs font-bold bg-white focus:ring-2 focus:ring-crimson-600"
+              onChange={(e) => setFormData({ ...formData, semester: e.target.value === '' ? '' : Number(e.target.value) })}
+              className="w-full px-3.5 py-2.5 rounded-xl border border-gray-300 text-xs font-bold bg-white focus:ring-2 focus:ring-crimson-600"
             >
+              <option value="">Select Semester...</option>
               {[1, 2, 3, 4, 5, 6, 7, 8].map(s => (
                 <option key={s} value={s}>Semester {s}</option>
               ))}
@@ -165,8 +213,15 @@ export default function CurriculumSubjectModal({
             </label>
             <select
               value={formData.elective_type}
-              onChange={(e) => setFormData({ ...formData, elective_type: e.target.value })}
-              className="w-full px-3 py-2.5 rounded-xl border border-gray-300 text-xs font-bold bg-white focus:ring-2 focus:ring-crimson-600"
+              onChange={(e) => {
+                const nextType = e.target.value;
+                setFormData(prev => ({
+                  ...prev,
+                  elective_type: nextType,
+                  offered_branches: nextType === 'OE' ? ['ALL'] : [coordinatorBranch || 'CSE']
+                }));
+              }}
+              className="w-full px-3.5 py-2.5 rounded-xl border border-gray-300 text-xs font-bold bg-white focus:ring-2 focus:ring-crimson-600"
             >
               <option value="PE">Professional Elective (PE)</option>
               <option value="OE">Open Elective (OE)</option>
@@ -180,7 +235,7 @@ export default function CurriculumSubjectModal({
             <select
               value={formData.elective_number}
               onChange={(e) => setFormData({ ...formData, elective_number: Number(e.target.value) })}
-              className="w-full px-3 py-2.5 rounded-xl border border-purple-300 text-xs font-bold bg-purple-50 text-purple-900 focus:ring-2 focus:ring-crimson-600"
+              className="w-full px-3.5 py-2.5 rounded-xl border border-purple-300 text-xs font-bold bg-purple-50 text-purple-900 focus:ring-2 focus:ring-crimson-600"
             >
               {formData.elective_type === 'PE' ? (
                 <>
@@ -238,6 +293,39 @@ export default function CurriculumSubjectModal({
             />
           </div>
         </div>
+
+        {isOE && (
+          <div className="p-3.5 bg-blue-50/70 border border-blue-200 rounded-xl space-y-2">
+            <span className="text-xs font-bold text-blue-900 block">Eligible Target Departments:</span>
+            <div className="flex flex-wrap gap-2">
+              {['ALL', ...availableTargetBranches].map(b => {
+                const isSelected = Array.isArray(formData.offered_branches) && formData.offered_branches.includes(b);
+                return (
+                  <button
+                    key={b}
+                    type="button"
+                    onClick={() => {
+                      if (b === 'ALL') {
+                        setFormData(prev => ({ ...prev, offered_branches: ['ALL'] }));
+                      } else {
+                        const cur = (prev => {
+                          const base = (prev.offered_branches || []).filter(x => x !== 'ALL');
+                          return base.includes(b) ? base.filter(x => x !== b) : [...base, b];
+                        })(formData);
+                        setFormData(prev => ({ ...prev, offered_branches: cur.length > 0 ? cur : ['ALL'] }));
+                      }
+                    }}
+                    className={`px-2.5 py-1 rounded-lg text-xs font-bold border transition-colors ${
+                      isSelected ? 'bg-blue-700 text-white border-blue-800' : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-100'
+                    }`}
+                  >
+                    {b === 'ALL' ? 'All Departments' : b}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
 
         <div className="flex items-center justify-end gap-3 pt-4 border-t border-gray-100">
           <button

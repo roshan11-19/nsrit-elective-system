@@ -1,9 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import Modal from '../common/Modal';
-import { Layers, CheckSquare, Square, Info, Calendar } from 'lucide-react';
+import { Layers, CheckSquare, Square, Info, Calendar, AlertCircle, CheckCircle2, Lock } from 'lucide-react';
 import { adminService } from '../../services/adminService';
 import { coordinatorService } from '../../services/coordinatorService';
-import { normalizeBatch } from '../../lib/storage';
+import { normalizeBatch, parseOfferedBranches, normalizeBranchName } from '../../lib/storage';
 
 export default function SubjectModal({ 
   isOpen, 
@@ -18,13 +18,16 @@ export default function SubjectModal({
   coordinatorBranch = 'CSE',
   registeredBranches = []
 }) {
+  const currentBranch = coordinatorBranch || 'CSE';
+  const initialAvailable = (registeredBranches || []).filter(b => normalizeBranchName(b) !== normalizeBranchName(currentBranch));
+
   const [formData, setFormData] = useState({
     subject_code: '',
     subject_name: '',
     elective_type: defaultType,
     elective_number: defaultElectiveNumber || 1,
-    branch: coordinatorBranch,
-    offered_branches: [],
+    branch: currentBranch,
+    offered_branches: defaultType === 'OE' ? ['ALL'] : [currentBranch],
     admitted_batch: defaultBatch || '',
     regulation: defaultRegulation || 'AR23',
     semester: defaultSemester || 5,
@@ -32,7 +35,7 @@ export default function SubjectModal({
     active: true
   });
 
-  const [availableBranches, setAvailableBranches] = useState([]);
+  const [availableBranches, setAvailableBranches] = useState(initialAvailable);
   const [adminBatches, setAdminBatches] = useState([]);
   const [adminWindows, setAdminWindows] = useState([]);
   const [peWindows, setPeWindows] = useState([]);
@@ -43,7 +46,8 @@ export default function SubjectModal({
   useEffect(() => {
     async function loadMetadata() {
       try {
-        const [coords, windows, peWins] = await Promise.all([
+        const [depts, coords, windows, peWins] = await Promise.all([
+          coordinatorService.getDepartments(),
           registeredBranches && registeredBranches.length > 0 
             ? Promise.resolve([]) 
             : adminService.getCoordinators(),
@@ -51,13 +55,14 @@ export default function SubjectModal({
           coordinatorService.getPESelectionWindows(coordinatorBranch)
         ]);
 
-        if (registeredBranches && registeredBranches.length > 0) {
-          setAvailableBranches(registeredBranches.filter(b => b.toUpperCase() !== String(coordinatorBranch).toUpperCase()));
-        } else if (coords && coords.length > 0) {
-          const branches = Array.from(new Set(coords.map(c => c.branch).filter(Boolean)))
-            .filter(b => b.toUpperCase() !== String(coordinatorBranch).toUpperCase());
-          setAvailableBranches(branches);
-        }
+        const allSources = [
+          ...(depts || []),
+          ...(registeredBranches || []),
+          ...(coords || []).map(c => c.branch).filter(Boolean)
+        ];
+        const uniqueBranches = Array.from(new Set(allSources))
+          .filter(b => normalizeBranchName(b) !== normalizeBranchName(coordinatorBranch));
+        setAvailableBranches(uniqueBranches);
 
         const winList = windows || [];
         setAdminWindows(winList);
@@ -81,19 +86,17 @@ export default function SubjectModal({
   useEffect(() => {
     if (!isOpen) return;
 
-    const currentBranch = coordinatorBranch || 'CSE';
+    const currBranch = coordinatorBranch || 'CSE';
     if (editingSubject) {
-      let offered = editingSubject.offered_branches;
-      if (typeof offered === 'string') {
-        try { offered = JSON.parse(offered); } catch { offered = [offered]; }
-      }
+      const eType = editingSubject.elective_type || defaultType;
+      const offered = parseOfferedBranches(editingSubject.offered_branches, eType === 'OE' ? ['ALL'] : [editingSubject.branch || currBranch]);
       setFormData({
         subject_code: editingSubject.subject_code || '',
         subject_name: editingSubject.subject_name || '',
-        elective_type: editingSubject.elective_type || defaultType,
+        elective_type: eType,
         elective_number: Number(editingSubject.elective_number || 1),
-        branch: editingSubject.branch || currentBranch,
-        offered_branches: Array.isArray(offered) ? offered : [],
+        branch: editingSubject.branch || currBranch,
+        offered_branches: offered,
         admitted_batch: normalizeBatch(editingSubject.admitted_batch || ''),
         regulation: editingSubject.regulation || defaultRegulation || 'AR23',
         semester: Number(editingSubject.semester || defaultSemester || 5),
@@ -106,8 +109,8 @@ export default function SubjectModal({
         subject_name: '',
         elective_type: defaultType,
         elective_number: Number(defaultElectiveNumber || 1),
-        branch: currentBranch,
-        offered_branches: defaultType === 'OE' ? availableBranches : [currentBranch],
+        branch: currBranch,
+        offered_branches: defaultType === 'OE' ? ['ALL'] : [currBranch],
         admitted_batch: defaultBatch || adminBatches[0] || '',
         regulation: defaultRegulation || 'AR23',
         semester: Number(defaultSemester || 5),
@@ -117,6 +120,21 @@ export default function SubjectModal({
     }
     setError('');
   }, [isOpen, editingSubject, defaultType, defaultBatch, defaultSemester, defaultElectiveNumber, defaultRegulation]);
+
+  const cleanBatchVal = normalizeBatch(formData.admitted_batch);
+  const matchingPEDriveVal = peWindows.find(w => 
+    normalizeBatch(w.batch) === cleanBatchVal && 
+    Number(w.semester) === Number(formData.semester) &&
+    (!w.elective_number || Number(w.elective_number) === Number(formData.elective_number || 1))
+  );
+  const matchingOEDriveVal = adminWindows.find(w => 
+    normalizeBatch(w.batch) === cleanBatchVal && 
+    Number(w.semester) === Number(formData.semester) &&
+    (!w.elective_number || Number(w.elective_number) === Number(formData.elective_number || 1))
+  );
+  const activeDrive = formData.elective_type === 'PE' ? matchingPEDriveVal : matchingOEDriveVal;
+  const isDriveConfigured = !!activeDrive;
+  const isDriveLive = activeDrive?.status === 'ACTIVE';
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -139,54 +157,41 @@ export default function SubjectModal({
       return;
     }
 
-    if (formData.elective_type === 'PE') {
-      const matchingDrive = peWindows.find(w => 
-        normalizeBatch(w.batch) === cleanBatch && Number(w.semester) === Number(formData.semester)
+    if (!activeDrive) {
+      setError(formData.elective_type === 'PE'
+        ? `Cannot add or edit PE course: The PE Selection Drive for Batch ${cleanBatch} • Semester ${formData.semester} • PE-${formData.elective_number || 1} has not been established yet. Please establish the PE Selection Drive in Setup Mode (LOCKED) in Tab 2 first.`
+        : `Cannot add or edit Open Elective course: The OE Selection Drive for Batch ${cleanBatch} • Semester ${formData.semester} • OE-${formData.elective_number || 1} has not been created by the College Administrator yet. The Administrator must create the OE Selection Drive in Setup Mode (LOCKED) first.`
       );
-      if (!matchingDrive) {
-        setError(`No PE Selection Drive established for Batch ${cleanBatch} (Semester ${formData.semester}). Please establish the drive in Tab 2 before adding offerings.`);
-        return;
-      }
-      if (matchingDrive.status === 'ACTIVE') {
-        setError(`Cannot add or edit subjects while the PE Selection Drive is ACTIVE for Batch ${cleanBatch} (Semester ${formData.semester}). Please pause the drive in Tab 2 first.`);
-        return;
-      }
+      return;
     }
 
-    if (formData.elective_type === 'OE') {
-      const matchingAdminDrive = adminWindows.find(w => 
-        normalizeBatch(w.batch) === cleanBatch && Number(w.semester) === Number(formData.semester)
+    if (isDriveLive) {
+      setError(formData.elective_type === 'PE'
+        ? `Cannot edit PE course while the PE Selection Drive is ACTIVE for Batch ${cleanBatch} (Semester ${formData.semester}). Please pause the drive in Tab 2 first.`
+        : `Cannot edit Open Elective course while the OE Selection Drive is ACTIVE for Batch ${cleanBatch} (Semester ${formData.semester}). Contact Central Administrator to pause the drive first.`
       );
-      if (!matchingAdminDrive) {
-        setError(`No Admin OE Selection Drive configured for Batch ${cleanBatch} (Semester ${formData.semester}). Central Administrator must first configure this drive in the Admin Portal before Open Electives can be offered.`);
-        return;
-      }
-      if (matchingAdminDrive.status === 'ACTIVE') {
-        setError(`Cannot add or edit subjects while the Institution OE Selection Drive is ACTIVE for Batch ${cleanBatch} (Semester ${formData.semester}). Contact Central Administrator to pause the drive first.`);
-        return;
-      }
-    }
-
-    if (formData.elective_type === 'OE' && (!formData.offered_branches || formData.offered_branches.length === 0)) {
-      setError('Please select at least one branch to offer this Open Elective to.');
       return;
     }
 
     try {
       setLoading(true);
+      const cleanOfferingBranch = coordinatorBranch || formData.branch || 'CSE';
+      const targetOfferedBranches = parseOfferedBranches(
+        formData.offered_branches,
+        formData.elective_type === 'PE' ? [cleanOfferingBranch] : ['ALL']
+      );
+
       const payload = {
         ...formData,
         subject_code: formData.subject_code.trim().toUpperCase().replace(/\s+/g, ''),
         subject_name: formData.subject_name.trim(),
         elective_number: Number(formData.elective_number || 1),
-        branch: coordinatorBranch || formData.branch || 'CSE',
+        branch: cleanOfferingBranch,
         admitted_batch: cleanBatch,
         regulation: (formData.regulation || 'AR23').trim().toUpperCase().replace(/\s+/g, ''),
         seats: Number(formData.seats),
         semester: Number(formData.semester),
-        offered_branches: formData.elective_type === 'PE' 
-          ? [coordinatorBranch || formData.branch || 'CSE'] 
-          : formData.offered_branches
+        offered_branches: targetOfferedBranches
       };
 
       await onSave(payload);
@@ -197,17 +202,6 @@ export default function SubjectModal({
       setLoading(false);
     }
   };
-
-  const cleanBatchVal = normalizeBatch(formData.admitted_batch);
-  const matchingPEDriveVal = peWindows.find(w => 
-    normalizeBatch(w.batch) === cleanBatchVal && Number(w.semester) === Number(formData.semester)
-  );
-  const matchingOEDriveVal = adminWindows.find(w => 
-    normalizeBatch(w.batch) === cleanBatchVal && Number(w.semester) === Number(formData.semester)
-  );
-  const activeDrive = formData.elective_type === 'PE' ? matchingPEDriveVal : matchingOEDriveVal;
-  const isDriveConfigured = !!activeDrive;
-  const isDriveLive = activeDrive?.status === 'ACTIVE';
 
   return (
     <Modal
@@ -226,34 +220,47 @@ export default function SubjectModal({
           </div>
         )}
 
-        {/* Drive Status Notice */}
+        {/* Drive Status Notice (3-State Matrix) */}
         {!isDriveConfigured ? (
-          <div className="p-3 bg-amber-50 border border-amber-200 text-amber-900 rounded-xl text-xs flex items-start gap-2.5">
-            <Info className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
+          /* STATE 1: Drive is NOT ADDED */
+          <div className="p-3 bg-amber-50 border border-amber-300 text-amber-900 rounded-xl text-xs flex items-start gap-2.5">
+            <AlertCircle className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
             <div>
               <span className="font-bold block">
-                {formData.elective_type === 'PE' ? 'PE Selection Drive Not Established' : 'Admin OE Batch Drive Not Configured'}
+                {formData.elective_type === 'PE' ? 'PE Selection Drive Not Added' : 'Admin OE Selection Drive Not Added'}
               </span>
               <span className="text-[11px] text-amber-800">
                 {formData.elective_type === 'PE'
-                  ? `Establish a PE Selection Drive for Batch ${cleanBatchVal || '—'} (Sem ${formData.semester}) in Tab 2 before saving offerings.`
-                  : `Admin must configure an OE Selection Drive for Batch ${cleanBatchVal || '—'} (Sem ${formData.semester}) in the Admin Portal first.`}
+                  ? `The PE Selection Drive for Batch ${cleanBatchVal || '...'} (Sem ${formData.semester} • PE-${formData.elective_number || 1}) has not been established in Tab 2. You cannot add or edit subjects and seats until the drive is established in Setup Mode.`
+                  : `The College Administrator must create the institutional OE Selection Drive in Setup Mode (LOCKED) for Batch ${cleanBatchVal || '...'} (Sem ${formData.semester} • OE-${formData.elective_number || 1}) before subjects and seats can be added or edited.`}
               </span>
             </div>
           </div>
         ) : isDriveLive ? (
+          /* STATE 2: Drive is ADDED but Selection is ACTIVE */
           <div className="p-3 bg-amber-50 border border-amber-300 text-amber-900 rounded-xl text-xs flex items-start gap-2.5">
-            <Info className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
+            <Lock className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
             <div>
               <span className="font-bold block">Student Selection Active (Editing Frozen)</span>
               <span className="text-[11px] text-amber-800">
                 {formData.elective_type === 'PE' 
-                  ? 'Pause the PE drive in Tab 2 to make subject changes.'
-                  : 'Contact Central Admin to pause the OE drive before making subject changes.'}
+                  ? 'Drive is currently active for student selection. You cannot add or edit subjects and seats. Pause the PE drive in Tab 2 first.'
+                  : 'Drive is currently active for student selection. You cannot add or edit subjects and seats. Contact Central Admin to pause the OE drive first.'}
               </span>
             </div>
           </div>
-        ) : null}
+        ) : (
+          /* STATE 3: Drive is ADDED and in SETUP MODE */
+          <div className="p-3 bg-emerald-50 border border-emerald-300 text-emerald-900 rounded-xl text-xs flex items-start gap-2.5">
+            <CheckCircle2 className="w-4 h-4 text-emerald-700 shrink-0 mt-0.5" />
+            <div>
+              <span className="font-bold block">Drive in Setup Mode • Ready for Configuration</span>
+              <span className="text-[11px] text-emerald-800">
+                You can add or edit subject details, title, and seat capacities.
+              </span>
+            </div>
+          </div>
+        )}
 
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
           <div>
@@ -457,8 +464,8 @@ export default function SubjectModal({
           </button>
           <button
             type="submit"
-            disabled={loading}
-            className="px-5 py-2 rounded-xl text-xs font-bold text-white crimson-gradient-btn shadow-sm disabled:opacity-50"
+            disabled={loading || isDriveLive || !isDriveConfigured}
+            className="px-5 py-2 rounded-xl text-xs font-bold text-white crimson-gradient-btn shadow-sm disabled:opacity-40 disabled:cursor-not-allowed"
           >
             {loading ? 'Saving...' : editingSubject ? 'Update Subject' : 'Save Subject'}
           </button>

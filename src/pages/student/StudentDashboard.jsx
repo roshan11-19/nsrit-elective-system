@@ -28,6 +28,8 @@ export default function StudentDashboard() {
   const [pastAllotments, setPastAllotments] = useState([]);
   const [peSemester, setPeSemester] = useState(currentSem);
   const [oeSemester, setOeSemester] = useState(currentSem);
+  const [peWindowInfo, setPeWindowInfo] = useState(null);
+  const [oeWindowInfo, setOeWindowInfo] = useState(null);
 
   useEffect(() => {
     async function loadDashboardData() {
@@ -38,19 +40,7 @@ export default function StudentDashboard() {
         setPeSemester(sem);
         setOeSemester(sem);
 
-        const [peA, oeA, peP, oeP, allAllots] = await Promise.all([
-          studentService.getAllotments(currentUser.id, 'PE', currentUser.email, sem),
-          studentService.getAllotments(currentUser.id, 'OE', currentUser.email, sem),
-          studentService.getSubmittedPreferences(currentUser.id, 'PE', sem),
-          studentService.getSubmittedPreferences(currentUser.id, 'OE', sem),
-          studentService.getAllotments(currentUser.id, 'ALL', currentUser.email)
-        ]);
-
-        setPeAllotments(peA || []);
-        setOeAllotments(oeA || []);
-        setPePrefs(peP || []);
-        setOePrefs(oeP || []);
-
+        const allAllots = await studentService.getAllotments(currentUser.id, 'ALL', currentUser.email);
         // Filter allotments from previous semesters
         const past = (allAllots || []).filter(a => Number(a.semester || a.subject?.semester || 5) !== sem);
         setPastAllotments(past);
@@ -62,6 +52,44 @@ export default function StudentDashboard() {
     }
     loadDashboardData();
   }, [currentUser]);
+
+  useEffect(() => {
+    async function updatePEData() {
+      if (!currentUser) return;
+      try {
+        const [peA, peP, peWin] = await Promise.all([
+          studentService.getAllotments(currentUser.id, 'PE', currentUser.email, peSemester),
+          studentService.getSubmittedPreferences(currentUser.id, 'PE', peSemester),
+          studentService.isSelectionOpen(currentUser, 'PE', peSemester)
+        ]);
+        setPeAllotments(peA || []);
+        setPePrefs(peP || []);
+        setPeWindowInfo(peWin || null);
+      } catch (err) {
+        console.warn('Update PE data note:', err);
+      }
+    }
+    updatePEData();
+  }, [currentUser, peSemester]);
+
+  useEffect(() => {
+    async function updateOEData() {
+      if (!currentUser) return;
+      try {
+        const [oeA, oeP, oeWin] = await Promise.all([
+          studentService.getAllotments(currentUser.id, 'OE', currentUser.email, oeSemester),
+          studentService.getSubmittedPreferences(currentUser.id, 'OE', oeSemester),
+          studentService.isSelectionOpen(currentUser, 'OE', oeSemester)
+        ]);
+        setOeAllotments(oeA || []);
+        setOePrefs(oeP || []);
+        setOeWindowInfo(oeWin || null);
+      } catch (err) {
+        console.warn('Update OE data note:', err);
+      }
+    }
+    updateOEData();
+  }, [currentUser, oeSemester]);
 
   if (loading) {
     return (
@@ -154,10 +182,15 @@ export default function StudentDashboard() {
                     <Lock className="w-3.5 h-3.5 text-amber-700" />
                     <span>Submitted & Locked</span>
                   </span>
-                ) : (
+                ) : peWindowInfo?.isOpen ? (
                   <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold bg-emerald-100 text-emerald-800 border border-emerald-300">
                     <Sparkles className="w-3.5 h-3.5 text-emerald-600" />
-                    <span>Selection Active</span>
+                    <span>Selection Active {peWindowInfo.activeElectiveNumbers?.length > 0 ? `(${peWindowInfo.activeElectiveNumbers.map(n => `PE-${n}`).join(', ')})` : ''}</span>
+                  </span>
+                ) : (
+                  <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold bg-amber-50 text-amber-800 border border-amber-200">
+                    <Lock className="w-3.5 h-3.5 text-amber-600" />
+                    <span>Drive Inactive (Preview Mode)</span>
                   </span>
                 )}
               </div>
@@ -170,35 +203,76 @@ export default function StudentDashboard() {
                 <p className="text-xs text-gray-600 mt-2 leading-relaxed">
                   Specialized domain courses exclusive to <strong>{currentUser?.branch}</strong> students in Semester {currentUser?.semester}.
                 </p>
+
+                {/* Due Date Indicator (Individual Per-Elective Deadlines) */}
+                {peWindowInfo?.allRelevantWins && peWindowInfo.allRelevantWins.length > 0 ? (
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {peWindowInfo.allRelevantWins.filter(w => w.due_date).map(w => {
+                      const eNum = Number(w.elective_number || 1);
+                      const isPast = new Date() > new Date(w.due_date);
+                      return (
+                        <div key={w.id || eNum} className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-medium ${
+                          isPast ? 'bg-rose-50 border-rose-200 text-rose-900' : 'bg-blue-50 border-blue-200 text-blue-900'
+                        }`}>
+                          <Clock className={`w-3.5 h-3.5 ${isPast ? 'text-rose-600' : 'text-blue-600'}`} />
+                          <span>
+                            <strong>PE-{eNum} Deadline:</strong> {new Date(w.due_date).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })}
+                            {isPast ? ' (Expired)' : ''}
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : peWindowInfo?.dueDate ? (
+                  <div className="mt-3 inline-flex items-center gap-1.5 px-3 py-1 rounded-lg bg-blue-50 border border-blue-200 text-xs text-blue-900 font-medium">
+                    <Clock className="w-3.5 h-3.5 text-blue-600" />
+                    <span>
+                      Deadline: <strong>{new Date(peWindowInfo.dueDate).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })}</strong>
+                      {new Date() > new Date(peWindowInfo.dueDate) ? ' (Expired)' : ''}
+                    </span>
+                  </div>
+                ) : null}
               </div>
 
               {/* Allotment Status Card */}
               {peAllotments.length > 0 ? (
-                <div className="space-y-2">
-                  {peAllotments.map((a, idx) => (
-                    <div key={a.id || idx} className={`p-3.5 rounded-xl border text-xs space-y-1.5 ${
-                      a.status === 'ALLOTTED' ? 'bg-emerald-50 border-emerald-200 text-emerald-950' : 'bg-amber-50 border-amber-200 text-amber-950'
-                    }`}>
-                      <div className="flex items-center justify-between font-bold">
-                        <span className="flex items-center gap-1.5">
-                          <span className="px-1.5 py-0.5 rounded bg-crimson-100 text-crimson-800 font-mono text-[10px]">
-                            PE-{a.elective_number || idx + 1}
-                          </span>
-                          <Award className="w-4 h-4 text-emerald-600" />
-                          <span>{a.status === 'ALLOTTED' ? `Allotted (Priority ${a.priority_selected})` : 'WAITLISTED'}</span>
-                        </span>
-                        <span className="text-[10px] font-mono text-gray-500">
-                          {a.allotted_at ? new Date(a.allotted_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'N/A'}
-                        </span>
-                      </div>
-                      {a.status === 'ALLOTTED' && (a.subject?.subject_name || a.subject_name) && (
-                        <div className="text-sm font-extrabold text-gray-900">
-                          {a.subject?.subject_name || a.subject_name} {(a.subject?.subject_code || a.subject_code) && (a.subject?.subject_code || a.subject_code) !== 'N/A' ? `(${a.subject?.subject_code || a.subject_code})` : ''}
-                        </div>
-                      )}
+                !peAllotments[0]?.allotment_revealed ? (
+                  <div className="p-4 rounded-xl bg-amber-50/90 border border-amber-200 text-xs space-y-1.5 shadow-2xs">
+                    <div className="flex items-center gap-2 font-bold text-amber-900">
+                      <Lock className="w-4 h-4 text-amber-700" />
+                      <span>Preferences Submitted & Locked</span>
                     </div>
-                  ))}
-                </div>
+                    <p className="text-[11px] text-amber-800 leading-relaxed font-medium">
+                      Your subject priority rankings have been submitted. Allotment results are pending official publication by the Department Coordinator.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    {peAllotments.map((a, idx) => (
+                      <div key={a.id || idx} className={`p-3.5 rounded-xl border text-xs space-y-1.5 ${
+                        a.status === 'ALLOTTED' ? 'bg-emerald-50 border-emerald-200 text-emerald-950' : 'bg-amber-50 border-amber-200 text-amber-950'
+                      }`}>
+                        <div className="flex items-center justify-between font-bold">
+                          <span className="flex items-center gap-1.5">
+                            <span className="px-1.5 py-0.5 rounded bg-crimson-100 text-crimson-800 font-mono text-[10px]">
+                              PE-{a.elective_number || idx + 1}
+                            </span>
+                            <Award className="w-4 h-4 text-emerald-600" />
+                            <span>{a.status === 'ALLOTTED' ? `Allotted (Priority ${a.priority_selected || 'Assigned'})` : 'WAITLISTED'}</span>
+                          </span>
+                          <span className="text-[10px] font-mono text-gray-500">
+                            {a.allotted_at ? new Date(a.allotted_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'N/A'}
+                          </span>
+                        </div>
+                        {a.status === 'ALLOTTED' && (a.subject?.subject_name || a.subject_name) && (
+                          <div className="text-sm font-extrabold text-gray-900">
+                            {a.subject?.subject_name || a.subject_name} {(a.subject?.subject_code || a.subject_code) && (a.subject?.subject_code || a.subject_code) !== 'N/A' ? `(${a.subject?.subject_code || a.subject_code})` : ''}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )
               ) : (
                 <div className="p-3.5 rounded-xl bg-gray-50 border border-gray-200 text-xs text-gray-500 flex items-center gap-2">
                   <Clock className="w-4 h-4 text-crimson-600 flex-shrink-0" />
@@ -228,23 +302,30 @@ export default function StudentDashboard() {
             {/* Action Bar */}
             <div className="p-6 sm:px-8 sm:py-5 bg-surface-50 border-t border-gray-100 flex items-center justify-between">
               {isPeLocked ? (
-                <Link
-                  to={`/student/allotment?type=PE&semester=${currentSem}`}
-                  className="text-xs font-bold text-crimson-700 hover:text-crimson-800 flex items-center gap-1"
-                >
-                  <FileCheck className="w-4 h-4" />
-                  <span>View Official Allotment Memo</span>
-                </Link>
+                !peAllotments[0]?.allotment_revealed ? (
+                  <span className="text-xs font-semibold text-amber-800 flex items-center gap-1.5">
+                    <Clock className="w-3.5 h-3.5 text-amber-600" />
+                    <span>Allotment Publication Pending</span>
+                  </span>
+                ) : (
+                  <Link
+                    to={`/student/allotment?type=PE&semester=${currentSem}`}
+                    className="text-xs font-bold text-crimson-700 hover:text-crimson-800 flex items-center gap-1"
+                  >
+                    <FileCheck className="w-4 h-4" />
+                    <span>View Official Allotment Memo</span>
+                  </Link>
+                )
               ) : (
-                <span className="text-xs text-gray-500 font-medium">Ready to Submit</span>
+                <span className="text-xs text-gray-500 font-medium">{peWindowInfo?.isOpen ? 'Ready to Submit' : 'Drive Inactive (Preview Only)'}</span>
               )}
 
               <Link
                 to={`/student/select?type=PE&semester=${peSemester}`}
                 className="px-4 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 shadow-sm transition-all text-white crimson-gradient-btn"
               >
-                <span>Select / View Subjects</span>
-                <ArrowRight className="w-3.5 h-3.5" />
+                <span>{isPeLocked ? (!peAllotments[0]?.allotment_revealed ? 'View Submitted Choices' : 'View Choices & Allotment') : (peWindowInfo?.isOpen ? 'Prioritize Subjects' : 'Explore Offered Subjects')}</span>
+                <ArrowRight className="w-4 h-4" />
               </Link>
             </div>
           </div>
@@ -263,10 +344,15 @@ export default function StudentDashboard() {
                     <Lock className="w-3.5 h-3.5 text-amber-700" />
                     <span>Submitted & Locked</span>
                   </span>
-                ) : (
+                ) : oeWindowInfo?.isOpen ? (
                   <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold bg-emerald-100 text-emerald-800 border border-emerald-300">
                     <Sparkles className="w-3.5 h-3.5 text-emerald-600" />
-                    <span>Selection Active</span>
+                    <span>Selection Active {oeWindowInfo.activeElectiveNumbers?.length > 0 ? `(${oeWindowInfo.activeElectiveNumbers.map(n => `OE-${n}`).join(', ')})` : ''}</span>
+                  </span>
+                ) : (
+                  <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold bg-amber-50 text-amber-800 border border-amber-200">
+                    <Lock className="w-3.5 h-3.5 text-amber-600" />
+                    <span>Drive Inactive (Preview Mode)</span>
                   </span>
                 )}
               </div>
@@ -279,35 +365,76 @@ export default function StudentDashboard() {
                 <p className="text-xs text-gray-600 mt-2 leading-relaxed">
                   Interdisciplinary subjects open across multiple departments for broad academic enrichment in Semester {currentSem}.
                 </p>
+
+                {/* Due Date Indicator (Individual Per-Elective Deadlines) */}
+                {oeWindowInfo?.allRelevantWins && oeWindowInfo.allRelevantWins.length > 0 ? (
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {oeWindowInfo.allRelevantWins.filter(w => w.due_date).map(w => {
+                      const eNum = Number(w.elective_number || 1);
+                      const isPast = new Date() > new Date(w.due_date);
+                      return (
+                        <div key={w.id || eNum} className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-medium ${
+                          isPast ? 'bg-rose-50 border-rose-200 text-rose-900' : 'bg-blue-50 border-blue-200 text-blue-900'
+                        }`}>
+                          <Clock className={`w-3.5 h-3.5 ${isPast ? 'text-rose-600' : 'text-blue-600'}`} />
+                          <span>
+                            <strong>OE-{eNum} Deadline:</strong> {new Date(w.due_date).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })}
+                            {isPast ? ' (Expired)' : ''}
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : oeWindowInfo?.dueDate ? (
+                  <div className="mt-3 inline-flex items-center gap-1.5 px-3 py-1 rounded-lg bg-blue-50 border border-blue-200 text-xs text-blue-900 font-medium">
+                    <Clock className="w-3.5 h-3.5 text-blue-600" />
+                    <span>
+                      Deadline: <strong>{new Date(oeWindowInfo.dueDate).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })}</strong>
+                      {new Date() > new Date(oeWindowInfo.dueDate) ? ' (Expired)' : ''}
+                    </span>
+                  </div>
+                ) : null}
               </div>
 
               {/* Allotment Status Card */}
               {oeAllotments.length > 0 ? (
-                <div className="space-y-2">
-                  {oeAllotments.map((a, idx) => (
-                    <div key={a.id || idx} className={`p-3.5 rounded-xl border text-xs space-y-1.5 ${
-                      a.status === 'ALLOTTED' ? 'bg-emerald-50 border-emerald-200 text-emerald-950' : 'bg-amber-50 border-amber-200 text-amber-950'
-                    }`}>
-                      <div className="flex items-center justify-between font-bold">
-                        <span className="flex items-center gap-1.5">
-                          <span className="px-1.5 py-0.5 rounded bg-blue-100 text-blue-800 font-mono text-[10px]">
-                            OE-{a.elective_number || idx + 1}
-                          </span>
-                          <Award className="w-4 h-4 text-emerald-600" />
-                          <span>{a.status === 'ALLOTTED' ? `Allotted (Priority ${a.priority_selected})` : 'WAITLISTED'}</span>
-                        </span>
-                        <span className="text-[10px] font-mono text-gray-500">
-                          {a.allotted_at ? new Date(a.allotted_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'N/A'}
-                        </span>
-                      </div>
-                      {a.status === 'ALLOTTED' && (a.subject?.subject_name || a.subject_name) && (
-                        <div className="text-sm font-extrabold text-gray-900">
-                          {a.subject?.subject_name || a.subject_name} {(a.subject?.subject_code || a.subject_code) && (a.subject?.subject_code || a.subject_code) !== 'N/A' ? `(${a.subject?.subject_code || a.subject_code})` : ''}
-                        </div>
-                      )}
+                !oeAllotments[0]?.allotment_revealed ? (
+                  <div className="p-4 rounded-xl bg-amber-50/90 border border-amber-200 text-xs space-y-1.5 shadow-2xs">
+                    <div className="flex items-center gap-2 font-bold text-amber-900">
+                      <Lock className="w-4 h-4 text-amber-700" />
+                      <span>Preferences Submitted & Locked</span>
                     </div>
-                  ))}
-                </div>
+                    <p className="text-[11px] text-amber-800 leading-relaxed font-medium">
+                      Your subject priority rankings have been submitted. Allotment results are pending official publication by the College Administrator.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    {oeAllotments.map((a, idx) => (
+                      <div key={a.id || idx} className={`p-3.5 rounded-xl border text-xs space-y-1.5 ${
+                        a.status === 'ALLOTTED' ? 'bg-emerald-50 border-emerald-200 text-emerald-950' : 'bg-amber-50 border-amber-200 text-amber-950'
+                      }`}>
+                        <div className="flex items-center justify-between font-bold">
+                          <span className="flex items-center gap-1.5">
+                            <span className="px-1.5 py-0.5 rounded bg-blue-100 text-blue-800 font-mono text-[10px]">
+                              OE-{a.elective_number || idx + 1}
+                            </span>
+                            <Award className="w-4 h-4 text-emerald-600" />
+                            <span>{a.status === 'ALLOTTED' ? `Allotted (Priority ${a.priority_selected || 'Assigned'})` : 'WAITLISTED'}</span>
+                          </span>
+                          <span className="text-[10px] font-mono text-gray-500">
+                            {a.allotted_at ? new Date(a.allotted_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'N/A'}
+                          </span>
+                        </div>
+                        {a.status === 'ALLOTTED' && (a.subject?.subject_name || a.subject_name) && (
+                          <div className="text-sm font-extrabold text-gray-900">
+                            {a.subject?.subject_name || a.subject_name} {(a.subject?.subject_code || a.subject_code) && (a.subject?.subject_code || a.subject_code) !== 'N/A' ? `(${a.subject?.subject_code || a.subject_code})` : ''}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )
               ) : (
                 <div className="p-3.5 rounded-xl bg-gray-50 border border-gray-200 text-xs text-gray-500 flex items-center gap-2">
                   <Clock className="w-4 h-4 text-crimson-600 flex-shrink-0" />
@@ -337,23 +464,30 @@ export default function StudentDashboard() {
             {/* Action Bar */}
             <div className="p-6 sm:px-8 sm:py-5 bg-surface-50 border-t border-gray-100 flex items-center justify-between">
               {isOeLocked ? (
-                <Link
-                  to={`/student/allotment?type=OE&semester=${currentSem}`}
-                  className="text-xs font-bold text-crimson-700 hover:text-crimson-800 flex items-center gap-1"
-                >
-                  <FileCheck className="w-4 h-4" />
-                  <span>View Official Allotment Memo</span>
-                </Link>
+                !oeAllotments[0]?.allotment_revealed ? (
+                  <span className="text-xs font-semibold text-amber-800 flex items-center gap-1.5">
+                    <Clock className="w-3.5 h-3.5 text-amber-600" />
+                    <span>Allotment Publication Pending</span>
+                  </span>
+                ) : (
+                  <Link
+                    to={`/student/allotment?type=OE&semester=${currentSem}`}
+                    className="text-xs font-bold text-crimson-700 hover:text-crimson-800 flex items-center gap-1"
+                  >
+                    <FileCheck className="w-4 h-4" />
+                    <span>View Official Allotment Memo</span>
+                  </Link>
+                )
               ) : (
-                <span className="text-xs text-gray-500 font-medium">Ready to Submit</span>
+                <span className="text-xs text-gray-500 font-medium">{oeWindowInfo?.isOpen ? 'Ready to Submit' : 'Drive Inactive (Preview Only)'}</span>
               )}
 
               <Link
                 to={`/student/select?type=OE&semester=${oeSemester}`}
                 className="px-4 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 shadow-sm transition-all text-white crimson-gradient-btn"
               >
-                <span>Select / View Subjects</span>
-                <ArrowRight className="w-3.5 h-3.5" />
+                <span>{isOeLocked ? (!oeAllotments[0]?.allotment_revealed ? 'View Submitted Choices' : 'View Choices & Allotment') : (oeWindowInfo?.isOpen ? 'Prioritize Subjects' : 'Explore Offered Subjects')}</span>
+                <ArrowRight className="w-4 h-4" />
               </Link>
             </div>
           </div>

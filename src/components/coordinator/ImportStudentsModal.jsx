@@ -19,11 +19,11 @@ export default function ImportStudentsModal({ isOpen, onClose, onImportSuccess, 
 
   // Batch details
   const [batchInfo, setBatchInfo] = useState({
-    regulation: 'AR23',
+    regulation: '',
     branch: coordinatorBranch || 'CSE',
-    section: 'A',
+    section: '',
     admitted_batch: '',
-    semester: 5
+    semester: ''
   });
 
   // Parsed students list from file
@@ -34,30 +34,64 @@ export default function ImportStudentsModal({ isOpen, onClose, onImportSuccess, 
   const [importResult, setImportResult] = useState(null);
 
   useEffect(() => {
-    setBatchInfo(prev => ({
-      ...prev,
-      branch: coordinatorBranch || 'CSE'
-    }));
+    if (!isOpen) {
+      setBatchInfo({
+        regulation: '',
+        branch: coordinatorBranch || 'CSE',
+        section: '',
+        admitted_batch: '',
+        semester: ''
+      });
+      setParsedStudents([]);
+      setFileName('');
+      setImportResult(null);
+      setError('');
+    } else {
+      setBatchInfo(prev => ({
+        ...prev,
+        branch: coordinatorBranch || 'CSE'
+      }));
+    }
   }, [coordinatorBranch, isOpen]);
 
-  // Download Sample Excel Template
-  const handleDownloadSample = () => {
-    const sampleData = [
-      { 'Roll Number': '24NU1A0501', 'Student Name': 'Aarav Sharma', 'Email': 'aarav.sharma@college.edu' },
-      { 'Roll Number': '24NU1A0502', 'Student Name': 'Bhavya Patel', 'Email': 'bhavya.patel@college.edu' },
-      { 'Roll Number': '24NU1A0503', 'Student Name': 'Chaitanya Reddy', 'Email': 'chaitanya.reddy@college.edu' },
-      { 'Roll Number': '24NU1A0504', 'Student Name': 'Deepika Rao', 'Email': 'deepika.rao@college.edu' },
-      { 'Roll Number': '24NU1A0505', 'Student Name': 'Eshwar Kumar', 'Email': 'eshwar.kumar@college.edu' }
-    ];
+  // Download Excel Template for Student Import
+  const handleDownloadSample = async () => {
+    const cleanBranch = coordinatorBranch || batchInfo.branch || 'CSE';
+    const cleanSection = batchInfo.section || 'A';
+    const cleanBatch = batchInfo.batch;
 
-    const worksheet = XLSX.utils.json_to_sheet(sampleData);
+    // Fetch existing students from database if available
+    let existingStudents = [];
+    try {
+      existingStudents = await coordinatorService.getStudents(cleanBranch);
+      if (cleanSection && cleanSection !== 'ALL') {
+        existingStudents = existingStudents.filter(s => s.section === cleanSection);
+      }
+      if (cleanBatch) {
+        existingStudents = existingStudents.filter(s => normalizeBatch(s.admitted_batch) === normalizeBatch(cleanBatch));
+      }
+    } catch (e) {}
+
+    const headers = ['Roll Number', 'Student Name', 'Email'];
+    let sheetData = [headers];
+
+    if (existingStudents && existingStudents.length > 0) {
+      const rows = existingStudents.map(s => [
+        s.roll_number || '',
+        s.name || '',
+        s.email || ''
+      ]);
+      sheetData = [headers, ...rows];
+    }
+
+    const worksheet = XLSX.utils.aoa_to_sheet(sheetData);
     const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(workbook, worksheet, 'Students');
 
     // Auto-size columns
     worksheet['!cols'] = [{ wch: 18 }, { wch: 25 }, { wch: 32 }];
 
-    XLSX.writeFile(workbook, `student_import_template_${coordinatorBranch || batchInfo.branch}_Sec${batchInfo.section}.xlsx`);
+    XLSX.writeFile(workbook, `student_import_template_${cleanBranch}_Sec${cleanSection}.xlsx`);
   };
 
   // Handle File Upload & Parse
@@ -148,9 +182,10 @@ export default function ImportStudentsModal({ isOpen, onClose, onImportSuccess, 
       return;
     }
 
-    const regValue = (batchInfo.regulation || 'AR23').trim().toUpperCase().replace(/\s+/g, '');
-    const secValue = (batchInfo.section || 'A').trim().toUpperCase().replace(/\s+/g, '');
+    const regValue = (batchInfo.regulation || '').trim().toUpperCase().replace(/\s+/g, '');
+    const secValue = (batchInfo.section || '').trim().toUpperCase().replace(/\s+/g, '');
     const batchValue = (batchInfo.admitted_batch || '').trim();
+    const semValue = Number(batchInfo.semester);
 
     if (!batchValue) {
       setError('Please select or specify an Academic Batch.');
@@ -167,6 +202,11 @@ export default function ImportStudentsModal({ isOpen, onClose, onImportSuccess, 
       return;
     }
 
+    if (!semValue || semValue < 1 || semValue > 8) {
+      setError('Please select a Semester (1 to 8).');
+      return;
+    }
+
     try {
       setLoading(true);
       setError('');
@@ -177,7 +217,7 @@ export default function ImportStudentsModal({ isOpen, onClose, onImportSuccess, 
         branch: coordinatorBranch || batchInfo.branch,
         section: secValue,
         admitted_batch: batchValue,
-        semester: Number(batchInfo.semester),
+        semester: semValue,
         role: 'student',
         password_changed: true
       }));
@@ -189,7 +229,7 @@ export default function ImportStudentsModal({ isOpen, onClose, onImportSuccess, 
         branch: coordinatorBranch || batchInfo.branch,
         section: secValue,
         admitted_batch: batchValue,
-        semester: batchInfo.semester
+        semester: semValue
       });
 
     } catch (err) {
@@ -204,6 +244,13 @@ export default function ImportStudentsModal({ isOpen, onClose, onImportSuccess, 
     setFileName('');
     setImportResult(null);
     setError('');
+    setBatchInfo({
+      regulation: '',
+      branch: coordinatorBranch || 'CSE',
+      section: '',
+      admitted_batch: '',
+      semester: ''
+    });
     if (fileInputRef.current) fileInputRef.current.value = '';
     onClose();
   };
@@ -334,9 +381,10 @@ export default function ImportStudentsModal({ isOpen, onClose, onImportSuccess, 
                 </label>
                 <select
                   value={batchInfo.semester}
-                  onChange={(e) => setBatchInfo({ ...batchInfo, semester: Number(e.target.value) })}
+                  onChange={(e) => setBatchInfo({ ...batchInfo, semester: e.target.value ? Number(e.target.value) : '' })}
                   className="w-full px-3 py-2 rounded-xl border border-gray-300 text-xs font-bold bg-white"
                 >
+                  <option value="">Select Sem...</option>
                   {[1, 2, 3, 4, 5, 6, 7, 8].map(s => (
                     <option key={s} value={s}>Sem {s}</option>
                   ))}
@@ -357,7 +405,7 @@ export default function ImportStudentsModal({ isOpen, onClose, onImportSuccess, 
                 className="text-xs font-bold text-crimson-700 hover:text-crimson-800 flex items-center gap-1 hover:underline"
               >
                 <Download className="w-3.5 h-3.5" />
-                <span>Download Sample Excel Template</span>
+                <span>Download Student Import Template</span>
               </button>
             </div>
 

@@ -1,38 +1,45 @@
 -- ==============================================================================
--- AUTOMATION FOR ELECTIVE SYSTEM (AES) — CLEAN DATABASE RESET & SCHEMA
+-- AUTOMATION FOR ELECTIVE SYSTEM (AES) — DATABASE SCHEMA & OPERATIONAL RESET
 -- ==============================================================================
 --
 -- ROLES:
 -- 1. admin: Institution-Level College Administrator (Registers Coordinators, Controls OE Batch Allotment Drives, Master Reports)
 -- 2. coordinator: Department / Branch Coordinator (Curriculum Upload, PE Batch Allotment Drive Control, Offering PE & OE Subjects, Students Management)
 -- 3. student: Student (Selects PE and eligible Open Elective subjects in FIFO order)
+--
+-- NOTE:
+-- - `profiles` (registered students, coordinators, admin) & `curriculum` (syllabus catalog)
+--   are PRESERVED and NEVER dropped so existing data is 100% safe.
+-- - Operational tables (subjects, allotment drives, student preferences, allotments)
+--   are cleanly refreshed.
 -- ==============================================================================
-
--- ------------------------------------------------------------------------------
--- 0. CLEAN RESET: DROP ALL EXISTING TABLES & FUNCTIONS
--- ------------------------------------------------------------------------------
-DROP TABLE IF EXISTS public.audit_logs CASCADE;
-DROP TABLE IF EXISTS public.allotments CASCADE;
-DROP TABLE IF EXISTS public.elective_preferences CASCADE;
-DROP TABLE IF EXISTS public.subjects CASCADE;
-DROP TABLE IF EXISTS public.curriculum CASCADE;
-DROP TABLE IF EXISTS public.selection_windows CASCADE;
-DROP TABLE IF EXISTS public.profiles CASCADE;
-DROP FUNCTION IF EXISTS public.submit_and_allot_preferences CASCADE;
 
 -- Enable UUID extension
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
 -- ------------------------------------------------------------------------------
--- 1. PROFILES TABLE (Admin, Coordinators & Registered Students)
+-- 0. OPERATIONAL CLEAN RESET: DROP TRANSACTIONAL TABLES ONLY
+-- (`profiles` and `curriculum` are intentionally PRESERVED and NOT dropped)
 -- ------------------------------------------------------------------------------
-CREATE TABLE public.profiles (
+DROP TABLE IF EXISTS public.audit_logs CASCADE;
+DROP TABLE IF EXISTS public.notification_logs CASCADE;
+DROP TABLE IF EXISTS public.allotments CASCADE;
+DROP TABLE IF EXISTS public.elective_preferences CASCADE;
+DROP TABLE IF EXISTS public.subjects CASCADE;
+DROP TABLE IF EXISTS public.selection_windows CASCADE;
+DROP TABLE IF EXISTS public.departments CASCADE;
+DROP FUNCTION IF EXISTS public.submit_and_allot_preferences CASCADE;
+
+-- ------------------------------------------------------------------------------
+-- 1. PROFILES TABLE (PRESERVED: Admin, Coordinators & Registered Students)
+-- ------------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.profiles (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     email VARCHAR(255) UNIQUE NOT NULL,
     roll_number VARCHAR(50),
     name VARCHAR(255) NOT NULL,
     role VARCHAR(20) NOT NULL CHECK (role IN ('student', 'coordinator', 'admin')),
-    branch VARCHAR(50), -- Department Branch (e.g. 'CSE', 'ECE', 'AIML'), 'ALL' for Admin
+    branch VARCHAR(50), -- Department Branch (e.g. 'CSE', 'ECE', 'MECH', 'AIML'), 'ALL' for Admin
     section VARCHAR(20) DEFAULT 'A',
     regulation VARCHAR(50) DEFAULT 'AR23',
     admitted_batch VARCHAR(50) DEFAULT '2024-2028',
@@ -41,45 +48,67 @@ CREATE TABLE public.profiles (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- Ensure non-destructive column presence on existing profiles table
+ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS roll_number VARCHAR(50);
+ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS section VARCHAR(20) DEFAULT 'A';
+ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS regulation VARCHAR(50) DEFAULT 'AR23';
+ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS admitted_batch VARCHAR(50) DEFAULT '2024-2028';
+ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS semester INTEGER NOT NULL DEFAULT 5;
+
 -- Lowercase email unique index for case-insensitive logins
-CREATE UNIQUE INDEX idx_profiles_email_lower ON public.profiles (LOWER(TRIM(email)));
+CREATE UNIQUE INDEX IF NOT EXISTS idx_profiles_email_lower ON public.profiles (LOWER(TRIM(email)));
 
 -- Uppercase roll number unique index (ensures unique Hall Ticket / Staff ID across profiles)
-CREATE UNIQUE INDEX idx_profiles_roll_upper ON public.profiles (UPPER(TRIM(roll_number))) WHERE roll_number IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_profiles_roll_upper ON public.profiles (UPPER(TRIM(roll_number))) WHERE roll_number IS NOT NULL;
 
 -- ------------------------------------------------------------------------------
--- 2. SELECTION WINDOWS TABLE (Batch Allotment Drive Controls)
--- PE: Operated by Department Coordinators
--- OE: Operated by Institution College Administrator
+-- 2. CURRICULUM TABLE (PRESERVED: Uploaded Batch-Wise Master Syllabus Catalog)
 -- ------------------------------------------------------------------------------
-CREATE TABLE public.selection_windows (
-    id VARCHAR(100) PRIMARY KEY, -- e.g. WINDOW_2024_2028_SEM5_PE_CSE, WINDOW_2024_2028_SEM5_OE
-    batch VARCHAR(50) NOT NULL,
-    branch VARCHAR(50) NOT NULL DEFAULT 'ALL', -- 'CSE', 'ECE', etc. for PE; 'ALL' for OE
-    semester INTEGER NOT NULL DEFAULT 5,
-    elective_type VARCHAR(10) NOT NULL DEFAULT 'PE' CHECK (elective_type IN ('PE', 'OE')),
-    status VARCHAR(30) NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE', 'LOCKED', 'CLOSED')),
-    title VARCHAR(255),
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
--- ------------------------------------------------------------------------------
--- 3. CURRICULUM TABLE (Uploaded Batch-Wise Master Syllabus Catalog)
--- ------------------------------------------------------------------------------
-CREATE TABLE public.curriculum (
+CREATE TABLE IF NOT EXISTS public.curriculum (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     batch VARCHAR(50) NOT NULL, -- Normalized e.g. '2024-2028'
-    branch VARCHAR(50) NOT NULL, -- Offering Department Branch (e.g. 'CSE', 'ECE')
+    branch VARCHAR(50) NOT NULL, -- Offering Department Branch (e.g. 'CSE', 'ECE', 'MECH')
     regulation VARCHAR(50) DEFAULT 'AR23',
     semester INTEGER NOT NULL CHECK (semester BETWEEN 1 AND 8),
     elective_type VARCHAR(10) NOT NULL CHECK (elective_type IN ('PE', 'OE')),
     elective_number INTEGER NOT NULL DEFAULT 1, -- e.g. 1 for PE-1 / OE-1, 2 for PE-2 / OE-2, etc.
     subject_code VARCHAR(50) NOT NULL,
     subject_name VARCHAR(255) NOT NULL,
+    offered_branches JSONB NOT NULL DEFAULT '["ALL"]'::jsonb,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CONSTRAINT uq_curriculum_batch_subject UNIQUE (batch, branch, subject_code)
+);
+
+-- Ensure non-destructive column presence on existing curriculum table
+ALTER TABLE public.curriculum ADD COLUMN IF NOT EXISTS regulation VARCHAR(50) DEFAULT 'AR23';
+ALTER TABLE public.curriculum ADD COLUMN IF NOT EXISTS elective_number INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE public.curriculum ADD COLUMN IF NOT EXISTS offered_branches JSONB NOT NULL DEFAULT '["ALL"]'::jsonb;
+
+-- ------------------------------------------------------------------------------
+-- 3. SELECTION WINDOWS TABLE (Batch Allotment Drive Controls)
+-- PE: Operated by Department Coordinators (PE-1, PE-2, PE-3, PE-4, etc.)
+-- OE: Operated by Institution College Administrator (OE-1, OE-2, etc.)
+-- ------------------------------------------------------------------------------
+CREATE TABLE public.selection_windows (
+    id VARCHAR(100) PRIMARY KEY, -- e.g. WINDOW_2024_2028_SEM5_PE1_CSE, WINDOW_2024_2028_SEM5_OE1
+    batch VARCHAR(50) NOT NULL,
+    branch VARCHAR(50) NOT NULL DEFAULT 'ALL', -- 'CSE', 'ECE', etc. for PE; 'ALL' for OE
+    semester INTEGER NOT NULL DEFAULT 5,
+    elective_type VARCHAR(10) NOT NULL DEFAULT 'PE' CHECK (elective_type IN ('PE', 'OE')),
+    elective_number INTEGER NOT NULL DEFAULT 1, -- e.g. 1 for PE-1 / OE-1, 2 for PE-2 / OE-2, 3 for PE-3, 4 for PE-4
+    status VARCHAR(30) NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE', 'LOCKED', 'CLOSED', 'PAUSED', 'SCHEDULED', 'COMPLETED', 'DRAFT')),
+    allotment_revealed BOOLEAN NOT NULL DEFAULT false,
+    reminder_24h_sent BOOLEAN NOT NULL DEFAULT false,
+    due_date TIMESTAMPTZ, -- Selection Deadline / End Time
+    start_date TIMESTAMPTZ, -- Scheduled Start Time
+    title VARCHAR(255),
+    description TEXT,
+    regulation VARCHAR(50) DEFAULT 'AR23',
+    total_seats INTEGER NOT NULL DEFAULT 0,
+    allocated_count INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 -- ------------------------------------------------------------------------------
@@ -87,11 +116,11 @@ CREATE TABLE public.curriculum (
 -- ------------------------------------------------------------------------------
 CREATE TABLE public.subjects (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    subject_code VARCHAR(50) NOT NULL UNIQUE,
+    subject_code VARCHAR(50) NOT NULL,
     subject_name VARCHAR(255) NOT NULL,
     elective_type VARCHAR(10) NOT NULL CHECK (elective_type IN ('PE', 'OE')),
     elective_number INTEGER NOT NULL DEFAULT 1, -- e.g. 1 for PE-1 / OE-1, 2 for PE-2 / OE-2, 3 for PE-3, etc.
-    branch VARCHAR(50) NOT NULL, -- Offering Department Branch (e.g. 'CSE', 'ECE')
+    branch VARCHAR(50) NOT NULL, -- Offering Department Branch (e.g. 'CSE', 'ECE', 'MECH')
     offered_branches JSONB NOT NULL DEFAULT '["ALL"]'::jsonb, -- Targeted eligible branches for OE (e.g. ["ECE", "MECH", "CIVIL"])
     admitted_batch VARCHAR(50) NOT NULL DEFAULT '2024-2028',
     regulation VARCHAR(50) DEFAULT 'AR23',
@@ -100,7 +129,8 @@ CREATE TABLE public.subjects (
     available_seats INTEGER NOT NULL CHECK (available_seats >= 0),
     active BOOLEAN NOT NULL DEFAULT true,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT uq_subject_code_batch UNIQUE (subject_code, admitted_batch, branch, elective_type, elective_number)
 );
 
 -- ------------------------------------------------------------------------------
@@ -109,6 +139,8 @@ CREATE TABLE public.subjects (
 CREATE TABLE public.elective_preferences (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     student_id UUID NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
+    roll_number VARCHAR(50),
+    student_name VARCHAR(255),
     elective_type VARCHAR(10) NOT NULL CHECK (elective_type IN ('PE', 'OE')),
     elective_number INTEGER NOT NULL DEFAULT 1,
     subject_id UUID NOT NULL REFERENCES public.subjects(id) ON DELETE CASCADE,
@@ -127,11 +159,15 @@ CREATE TABLE public.allotments (
     student_id UUID NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
     roll_number VARCHAR(50),
     student_email VARCHAR(255) NOT NULL,
+    student_name VARCHAR(255),
     elective_type VARCHAR(10) NOT NULL CHECK (elective_type IN ('PE', 'OE')),
     elective_number INTEGER NOT NULL DEFAULT 1,
     subject_id UUID REFERENCES public.subjects(id) ON DELETE SET NULL,
     priority_selected INTEGER,
     status VARCHAR(30) NOT NULL DEFAULT 'ALLOTTED' CHECK (status IN ('ALLOTTED', 'NOT_ALLOTTED', 'WAITLISTED', 'CANCELLED')),
+    is_auto_allocated BOOLEAN NOT NULL DEFAULT false,
+    history_id VARCHAR(100),
+    allotment_revealed BOOLEAN NOT NULL DEFAULT false,
     submitted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     allotted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -140,7 +176,25 @@ CREATE TABLE public.allotments (
 );
 
 -- ------------------------------------------------------------------------------
--- 7. AUDIT LOGS TABLE (Immutable Override and Reset Log)
+-- 7. NOTIFICATION LOGS TABLE (Automated & On-Demand Email Audit Record)
+-- ------------------------------------------------------------------------------
+CREATE TABLE public.notification_logs (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    type VARCHAR(50) NOT NULL, -- 'DEADLINE_24H_REMINDER', 'INVITATION', 'SELECTION_OPEN', 'ALLOTMENT_PUBLISHED'
+    sender_email VARCHAR(255) NOT NULL DEFAULT 'nsritelectivesystem@gmail.com',
+    recipient_count INTEGER NOT NULL DEFAULT 0,
+    recipients JSONB DEFAULT '[]'::jsonb,
+    subject TEXT NOT NULL,
+    body TEXT,
+    window_id VARCHAR(100) REFERENCES public.selection_windows(id) ON DELETE SET NULL,
+    elective_type VARCHAR(10),
+    elective_number INTEGER DEFAULT 1,
+    status VARCHAR(20) NOT NULL DEFAULT 'SENT',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- ------------------------------------------------------------------------------
+-- 8. AUDIT LOGS TABLE (Immutable Override and Reset Log)
 -- ------------------------------------------------------------------------------
 CREATE TABLE public.audit_logs (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -156,16 +210,16 @@ CREATE TABLE public.audit_logs (
 -- ------------------------------------------------------------------------------
 -- PERFORMANCE INDEXES (High-Speed FIFO, Filtering & Isolation)
 -- ------------------------------------------------------------------------------
-CREATE INDEX idx_curriculum_lookup ON public.curriculum (batch, branch, semester, elective_type, elective_number);
-CREATE INDEX idx_preferences_fifo ON public.elective_preferences (elective_type, submitted_at ASC, id ASC);
-CREATE INDEX idx_allotments_student ON public.allotments (student_id, elective_type);
-CREATE INDEX idx_allotments_subject ON public.allotments (subject_id, status);
-CREATE INDEX idx_subjects_lookup ON public.subjects (elective_type, branch, semester, admitted_batch);
-CREATE INDEX idx_profiles_branch ON public.profiles (branch, role);
-CREATE INDEX idx_selection_windows_lookup ON public.selection_windows (batch, branch, semester, elective_type, status);
+CREATE INDEX IF NOT EXISTS idx_curriculum_lookup ON public.curriculum (batch, branch, semester, elective_type, elective_number);
+CREATE INDEX IF NOT EXISTS idx_preferences_fifo ON public.elective_preferences (elective_type, submitted_at ASC, id ASC);
+CREATE INDEX IF NOT EXISTS idx_allotments_student ON public.allotments (student_id, elective_type);
+CREATE INDEX IF NOT EXISTS idx_allotments_subject ON public.allotments (subject_id, status);
+CREATE INDEX IF NOT EXISTS idx_subjects_lookup ON public.subjects (elective_type, branch, semester, admitted_batch, elective_number);
+CREATE INDEX IF NOT EXISTS idx_profiles_branch ON public.profiles (branch, role);
+CREATE INDEX IF NOT EXISTS idx_selection_windows_lookup ON public.selection_windows (batch, branch, semester, elective_type, elective_number, status);
 
 -- ------------------------------------------------------------------------------
--- 8. ATOMIC REAL-TIME FIFO SUBMISSION & ALLOTMENT ENGINE (POSTGRESQL RPC)
+-- 9. ATOMIC REAL-TIME FIFO SUBMISSION & ALLOTMENT ENGINE (POSTGRESQL RPC)
 -- ------------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION public.submit_and_allot_preferences(
     p_student_id UUID,
@@ -219,6 +273,8 @@ BEGIN
         LOOP
             INSERT INTO public.elective_preferences (
                 student_id,
+                roll_number,
+                student_name,
                 elective_type,
                 elective_number,
                 subject_id,
@@ -226,6 +282,8 @@ BEGIN
                 submitted_at
             ) VALUES (
                 p_student_id,
+                v_student.roll_number,
+                v_student.name,
                 p_elective_type,
                 v_slot.slot_num,
                 v_pref.subject_id,
@@ -260,6 +318,7 @@ BEGIN
             student_id,
             roll_number,
             student_email,
+            student_name,
             elective_type,
             elective_number,
             subject_id,
@@ -271,6 +330,7 @@ BEGIN
             p_student_id,
             v_student.roll_number,
             v_student.email,
+            v_student.name,
             p_elective_type,
             v_slot.slot_num,
             v_assigned_subject_id,
@@ -297,7 +357,7 @@ END;
 $$;
 
 -- ------------------------------------------------------------------------------
--- 9. ROW LEVEL SECURITY (RLS) POLICIES
+-- 10. ROW LEVEL SECURITY (RLS) POLICIES
 -- ------------------------------------------------------------------------------
 ALTER TABLE public.profiles ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.curriculum ENABLE ROW LEVEL SECURITY;
@@ -305,41 +365,51 @@ ALTER TABLE public.subjects ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.selection_windows ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.elective_preferences ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.allotments ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.notification_logs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.audit_logs ENABLE ROW LEVEL SECURITY;
 
--- 9.1 PROFILES POLICIES
+-- 10.1 PROFILES POLICIES
+DROP POLICY IF EXISTS "Allow all on profiles" ON public.profiles;
 CREATE POLICY "Allow all on profiles" ON public.profiles FOR ALL USING (true) WITH CHECK (true);
 
--- 9.2 CURRICULUM POLICIES
+-- 10.2 CURRICULUM POLICIES
+DROP POLICY IF EXISTS "Allow all on curriculum" ON public.curriculum;
 CREATE POLICY "Allow all on curriculum" ON public.curriculum FOR ALL USING (true) WITH CHECK (true);
 
--- 9.3 SUBJECTS POLICIES
+-- 10.3 SUBJECTS POLICIES
+DROP POLICY IF EXISTS "Allow all on subjects" ON public.subjects;
 CREATE POLICY "Allow all on subjects" ON public.subjects FOR ALL USING (true) WITH CHECK (true);
 
--- 9.4 SELECTION WINDOWS POLICIES
+-- 10.4 SELECTION WINDOWS POLICIES
+DROP POLICY IF EXISTS "Allow all on selection_windows" ON public.selection_windows;
 CREATE POLICY "Allow all on selection_windows" ON public.selection_windows FOR ALL USING (true) WITH CHECK (true);
 
--- 9.5 ELECTIVE PREFERENCES POLICIES
+-- 10.5 ELECTIVE PREFERENCES POLICIES
+DROP POLICY IF EXISTS "Allow all on preferences" ON public.elective_preferences;
 CREATE POLICY "Allow all on preferences" ON public.elective_preferences FOR ALL USING (true) WITH CHECK (true);
 
--- 9.6 ALLOTMENTS POLICIES
+-- 10.6 ALLOTMENTS POLICIES
+DROP POLICY IF EXISTS "Allow all on allotments" ON public.allotments;
 CREATE POLICY "Allow all on allotments" ON public.allotments FOR ALL USING (true) WITH CHECK (true);
 
--- 9.7 AUDIT LOGS POLICIES
+-- 10.7 NOTIFICATION LOGS POLICIES
+DROP POLICY IF EXISTS "Allow all on notification_logs" ON public.notification_logs;
+CREATE POLICY "Allow all on notification_logs" ON public.notification_logs FOR ALL USING (true) WITH CHECK (true);
+
+-- 10.8 AUDIT LOGS POLICIES
+DROP POLICY IF EXISTS "Allow all on audit_logs" ON public.audit_logs;
 CREATE POLICY "Allow all on audit_logs" ON public.audit_logs FOR ALL USING (true) WITH CHECK (true);
 
 -- ------------------------------------------------------------------------------
--- 10. FRESH SEED DATA (Admin & Department Coordinators)
+-- 11. DEFAULT ADMIN ACCOUNT (Non-destructive: will never overwrite coordinators or students)
 -- ------------------------------------------------------------------------------
 INSERT INTO public.profiles (id, email, roll_number, name, role, branch, section, regulation, admitted_batch, semester)
 VALUES 
-('a0000000-0000-0000-0000-000000000001', 'nsritelectivesystem@gmail.com', 'ADMIN-01', 'College Administrator', 'admin', 'ALL', 'Admin', 'Autonomous', NULL, 1),
-('c0000000-0000-0000-0000-000000000001', 'cse.coordinator@college.edu', 'COORD-CSE-01', 'CSE Academic Coordinator', 'coordinator', 'CSE', 'Admin', 'AR23', NULL, 5),
-('c0000000-0000-0000-0000-000000000002', 'ece.coord@college.edu', 'COORD-ECE-01', 'ECE Academic Coordinator', 'coordinator', 'ECE', 'Admin', 'AR23', NULL, 5),
-('c0000000-0000-0000-0000-000000000003', 'coordinator@college.edu', 'COORD-CSE-02', 'CSE Academic Coordinator (General)', 'coordinator', 'CSE', 'Admin', 'AR23', NULL, 5)
+('a0000000-0000-0000-0000-000000000001', 'nsritelectivesystem@gmail.com', 'ADMIN-01', 'College Administrator', 'admin', 'ALL', 'Admin', 'Autonomous', NULL, 1)
 ON CONFLICT (email) DO UPDATE SET 
   name = EXCLUDED.name,
   roll_number = EXCLUDED.roll_number,
   role = EXCLUDED.role;
+
 
 

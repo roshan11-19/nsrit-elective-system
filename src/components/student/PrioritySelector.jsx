@@ -124,6 +124,11 @@ export default function PrioritySelector({ subjects = [], priorities = [], onCha
                     <span className="text-xs font-bold uppercase tracking-wider px-2 py-0.5 rounded bg-gray-100 text-gray-700 font-mono">
                       {subject.subject_code}
                     </span>
+                    {subject.branch && (
+                      <span className="px-2 py-0.5 rounded bg-purple-50 text-purple-700 font-bold text-[10px] font-mono border border-purple-200">
+                        Dept: {subject.branch}
+                      </span>
+                    )}
                     <span className="text-xs font-semibold text-crimson-700">
                       Priority {index + 1}
                     </span>

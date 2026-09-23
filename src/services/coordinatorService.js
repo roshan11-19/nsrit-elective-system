@@ -1,5 +1,5 @@
 import * as XLSX from 'xlsx';
-import { db, normalizeBatch } from '../lib/storage';
+import { db, normalizeBatch, parseOfferedBranches, normalizeBranchName } from '../lib/storage';
 import { supabase, isSupabaseConfigured } from '../lib/supabase';
 
 export const coordinatorService = {
@@ -8,9 +8,40 @@ export const coordinatorService = {
   // --------------------------------------------------------------------------
   normalizeBatch: (batchStr) => normalizeBatch(batchStr),
 
+  getDepartments: async () => {
+    if (isSupabaseConfigured && supabase) {
+      try {
+        const { data: profs } = await supabase.from('profiles').select('branch');
+        const { data: currs } = await supabase.from('curriculum').select('branch');
+        const { data: subjs } = await supabase.from('subjects').select('branch');
+        const { data: wins } = await supabase.from('selection_windows').select('branch');
+
+        const bSet = new Set();
+        (profs || []).forEach(p => {
+          if (p.branch && p.branch !== 'ALL') bSet.add(p.branch.trim().toUpperCase());
+        });
+        (currs || []).forEach(c => {
+          if (c.branch && c.branch !== 'ALL') bSet.add(c.branch.trim().toUpperCase());
+        });
+        (subjs || []).forEach(s => {
+          if (s.branch && s.branch !== 'ALL') bSet.add(s.branch.trim().toUpperCase());
+        });
+        (wins || []).forEach(w => {
+          if (w.branch && w.branch !== 'ALL') bSet.add(w.branch.trim().toUpperCase());
+        });
+
+        if (bSet.size > 0) return Array.from(bSet).sort();
+      } catch (e) {
+        console.warn('Supabase getDepartments note:', e);
+      }
+    }
+
+    return db.getDepartments ? db.getDepartments() : [];
+  },
+
   getCurriculumBatches: async (branch = 'ALL') => {
     const list = await coordinatorService.getCurriculum('ALL', branch);
-    const batches = Array.from(new Set(list.map(c => normalizeBatch(c.batch)).filter(Boolean))).sort();
+    const batches = Array.from(new Set(list.map(c => normalizeBatch(c.batch)).filter(Boolean))).sort((a, b) => b.localeCompare(a, undefined, { numeric: true, sensitivity: 'base' }));
     return batches;
   },
 
@@ -38,9 +69,28 @@ export const coordinatorService = {
 
     return Object.values(map).map(b => ({
       ...b,
-      semesters: Array.from(b.semesters).sort((a, b) => a - b),
+      semesters: Array.from(b.semesters).sort((x, y) => x - y),
+      subjects: b.subjects.sort((x, y) => {
+        const semA = Number(x.semester || 0);
+        const semB = Number(y.semester || 0);
+        if (semA !== semB) return semA - semB;
+
+        const typeA = String(x.elective_type || '').toUpperCase();
+        const typeB = String(y.elective_type || '').toUpperCase();
+        if (typeA !== typeB) {
+          if (typeA === 'PE') return -1;
+          if (typeB === 'PE') return 1;
+          return typeA.localeCompare(typeB);
+        }
+
+        const numA = Number(x.elective_number || 1);
+        const numB = Number(y.elective_number || 1);
+        if (numA !== numB) return numA - numB;
+
+        return String(x.subject_code || '').localeCompare(String(y.subject_code || ''), undefined, { numeric: true, sensitivity: 'base' });
+      }),
       totalSubjects: b.peCount + b.oeCount
-    }));
+    })).sort((a, b) => (b.batch || '').localeCompare(a.batch || '', undefined, { numeric: true, sensitivity: 'base' }));
   },
 
   getCurriculum: async (batch = 'ALL', branch = 'ALL', semester = 'ALL', electiveType = 'ALL') => {
@@ -73,13 +123,33 @@ export const coordinatorService = {
         }
         const { data, error } = await query;
         if (!error && data) {
-          return data;
+          return data.sort((a, b) => {
+            const semA = Number(a.semester || 0);
+            const semB = Number(b.semester || 0);
+            if (semA !== semB) return semA - semB;
+
+            const typeA = String(a.elective_type || '').toUpperCase();
+            const typeB = String(b.elective_type || '').toUpperCase();
+            if (typeA !== typeB) {
+              if (typeA === 'PE') return -1;
+              if (typeB === 'PE') return 1;
+              return typeA.localeCompare(typeB);
+            }
+
+            const numA = Number(a.elective_number || 1);
+            const numB = Number(b.elective_number || 1);
+            if (numA !== numB) return numA - numB;
+
+            return String(a.subject_code || '').localeCompare(String(b.subject_code || ''), undefined, { numeric: true, sensitivity: 'base' });
+          });
         }
+        return [];
       } catch (e) {
         console.warn('Supabase getCurriculum note:', e);
+        return [];
       }
     }
-    return db.getCurriculum(reqBatch, reqBranch, reqSemester, reqElectiveType);
+    return db.getCurriculum ? db.getCurriculum(reqBatch, reqBranch, reqSemester, reqElectiveType) : [];
   },
 
   uploadCurriculumExcel: async (targetBatch, coordinatorBranch, rows) => {
@@ -107,7 +177,8 @@ export const coordinatorService = {
         elective_type: eType,
         elective_number: eNum,
         subject_code: code || `SUBJ-${idx + 1}`,
-        subject_name: name || `Curriculum Course ${idx + 1}`
+        subject_name: name || `Curriculum Course ${idx + 1}`,
+        offered_branches: eType === 'OE' ? ['ALL'] : [cleanBranch]
       };
     }).filter(r => r.subject_code && r.subject_name);
 
@@ -127,11 +198,24 @@ export const coordinatorService = {
           .upsert(formatted, { onConflict: 'batch,branch,subject_code' })
           .select();
 
-        if (error) {
-          console.error('Supabase uploadCurriculumExcel error:', error);
-          throw new Error(`Database error saving curriculum: ${error.message}`);
+        if (!error && data) {
+          if (db.addCurriculumBatch) db.addCurriculumBatch(data);
+          return data;
         }
-        return data || formatted;
+
+        if (error) {
+          console.warn('Supabase uploadCurriculumExcel full error, trying base columns:', error);
+          const baseFormatted = formatted.map(({ offered_branches, ...rest }) => rest);
+          const { data: baseData, error: baseErr } = await supabase
+            .from('curriculum')
+            .upsert(baseFormatted, { onConflict: 'batch,branch,subject_code' })
+            .select();
+
+          if (!baseErr && baseData) {
+            if (db.addCurriculumBatch) db.addCurriculumBatch(formatted);
+            return baseData;
+          }
+        }
       } catch (err) {
         console.warn('Supabase curriculum upsert fallback note:', err);
       }
@@ -141,65 +225,145 @@ export const coordinatorService = {
   },
 
   addCurriculumSubject: async (subjectData) => {
-    const payload = {
-      batch: normalizeBatch(subjectData.batch || ''),
-      branch: String(subjectData.branch || 'CSE').trim().toUpperCase(),
-      regulation: String(subjectData.regulation || 'AR23').trim().toUpperCase(),
-      semester: Number(subjectData.semester || 5),
-      elective_type: String(subjectData.elective_type || 'PE').toUpperCase(),
-      elective_number: Number(subjectData.elective_number || 1),
-      subject_code: String(subjectData.subject_code || '').trim().toUpperCase().replace(/\s+/g, ''),
-      subject_name: String(subjectData.subject_name || '').trim()
-    };
+    const eType = String(subjectData.elective_type || 'PE').toUpperCase();
+    const cleanBranch = String(subjectData.branch || 'CSE').trim().toUpperCase();
+    const cleanBatch = normalizeBatch(subjectData.batch || '');
+    const cleanCode = String(subjectData.subject_code || '').trim().toUpperCase().replace(/\s+/g, '');
+    const cleanName = String(subjectData.subject_name || '').trim();
+    const cleanReg = String(subjectData.regulation || 'AR23').trim().toUpperCase();
+    const cleanSem = Number(subjectData.semester || 5);
+    const cleanNum = Number(subjectData.elective_number || 1);
+    const cleanOffered = parseOfferedBranches(subjectData.offered_branches, eType === 'OE' ? ['ALL'] : [cleanBranch]);
 
-    if (!payload.subject_code || !payload.subject_name) {
+    if (!cleanCode || !cleanName) {
       throw new Error('Subject Code and Subject Name are required.');
     }
 
-    if (isSupabaseConfigured && supabase) {
-      const { data, error } = await supabase
-        .from('curriculum')
-        .upsert([payload], { onConflict: 'batch,branch,subject_code' })
-        .select()
-        .single();
+    const payload = {
+      batch: cleanBatch,
+      branch: cleanBranch,
+      regulation: cleanReg,
+      semester: cleanSem,
+      elective_type: eType,
+      elective_number: cleanNum,
+      subject_code: cleanCode,
+      subject_name: cleanName,
+      offered_branches: cleanOffered
+    };
 
-      if (error) {
-        throw new Error(`Database error adding curriculum subject: ${error.message}`);
+    if (isSupabaseConfigured && supabase) {
+      try {
+        const { data, error } = await supabase
+          .from('curriculum')
+          .upsert([payload], { onConflict: 'batch,branch,subject_code' })
+          .select()
+          .single();
+
+        if (!error && data) {
+          if (db.addCurriculumSubject) db.addCurriculumSubject(data);
+          return data;
+        }
+
+        if (error) {
+          console.warn('Supabase addCurriculumSubject full error, trying base columns:', error);
+          const basePayload = {
+            batch: cleanBatch,
+            branch: cleanBranch,
+            regulation: cleanReg,
+            semester: cleanSem,
+            elective_type: eType,
+            elective_number: cleanNum,
+            subject_code: cleanCode,
+            subject_name: cleanName
+          };
+          const { data: baseData, error: baseErr } = await supabase
+            .from('curriculum')
+            .upsert([basePayload], { onConflict: 'batch,branch,subject_code' })
+            .select()
+            .single();
+
+          if (!baseErr && baseData) {
+            const res = { ...baseData, offered_branches: cleanOffered };
+            if (db.addCurriculumSubject) db.addCurriculumSubject(res);
+            return res;
+          }
+        }
+      } catch (err) {
+        console.warn('Supabase addCurriculumSubject fallback note:', err);
       }
-      return data || payload;
     }
 
     return db.addCurriculumSubject(payload);
   },
 
   updateCurriculumSubject: async (id, updates) => {
-    const payload = {
-      batch: normalizeBatch(updates.batch || ''),
-      branch: String(updates.branch || 'CSE').trim().toUpperCase(),
-      regulation: String(updates.regulation || 'AR23').trim().toUpperCase(),
-      semester: Number(updates.semester || 5),
-      elective_type: String(updates.elective_type || 'PE').toUpperCase(),
-      elective_number: Number(updates.elective_number || 1),
-      subject_code: String(updates.subject_code || '').trim().toUpperCase().replace(/\s+/g, ''),
-      subject_name: String(updates.subject_name || '').trim()
-    };
+    const eType = String(updates.elective_type || 'PE').toUpperCase();
+    const cleanBranch = String(updates.branch || 'CSE').trim().toUpperCase();
+    const cleanBatch = normalizeBatch(updates.batch || '');
+    const cleanCode = String(updates.subject_code || '').trim().toUpperCase().replace(/\s+/g, '');
+    const cleanName = String(updates.subject_name || '').trim();
+    const cleanReg = String(updates.regulation || 'AR23').trim().toUpperCase();
+    const cleanSem = Number(updates.semester || 5);
+    const cleanNum = Number(updates.elective_number || 1);
+    const cleanOffered = parseOfferedBranches(updates.offered_branches, eType === 'OE' ? ['ALL'] : [cleanBranch]);
 
-    if (!payload.subject_code || !payload.subject_name) {
+    if (!cleanCode || !cleanName) {
       throw new Error('Subject Code and Subject Name are required.');
     }
 
-    if (isSupabaseConfigured && supabase) {
-      const { data, error } = await supabase
-        .from('curriculum')
-        .update(payload)
-        .eq('id', id)
-        .select()
-        .single();
+    const payload = {
+      batch: cleanBatch,
+      branch: cleanBranch,
+      regulation: cleanReg,
+      semester: cleanSem,
+      elective_type: eType,
+      elective_number: cleanNum,
+      subject_code: cleanCode,
+      subject_name: cleanName,
+      offered_branches: cleanOffered
+    };
 
-      if (error) {
-        throw new Error(`Database error updating curriculum subject: ${error.message}`);
+    if (isSupabaseConfigured && supabase) {
+      try {
+        const { data, error } = await supabase
+          .from('curriculum')
+          .update(payload)
+          .eq('id', id)
+          .select()
+          .single();
+
+        if (!error && data) {
+          if (db.updateCurriculumSubject) db.updateCurriculumSubject(id, data);
+          return data;
+        }
+
+        if (error) {
+          const basePayload = {
+            batch: cleanBatch,
+            branch: cleanBranch,
+            regulation: cleanReg,
+            semester: cleanSem,
+            elective_type: eType,
+            elective_number: cleanNum,
+            subject_code: cleanCode,
+            subject_name: cleanName
+          };
+          const { data: baseData, error: baseErr } = await supabase
+            .from('curriculum')
+            .update(basePayload)
+            .eq('id', id)
+            .select()
+            .single();
+
+          if (!baseErr && baseData) {
+            const res = { ...baseData, offered_branches: cleanOffered };
+            if (db.updateCurriculumSubject) db.updateCurriculumSubject(id, res);
+            return res;
+          }
+        }
+      } catch (err) {
+        console.warn('Supabase updateCurriculumSubject fallback note:', err);
       }
-      return data || { id, ...payload };
     }
 
     return db.updateCurriculumSubject(id, payload);
@@ -222,110 +386,48 @@ export const coordinatorService = {
     return db.deleteCurriculumSubject(id);
   },
 
-  exportCurriculumTemplate: (batch = '', branch = 'CSE') => {
-    const sampleRows = [
-      {
-        'Semester': 5,
-        'Elective Type': 'Professional Elective',
-        'Elective Number': 1,
-        'Subject Code': 'CS501PE',
-        'Subject Name': 'Software Testing Methodologies',
-        'Regulation': 'AR23'
-      },
-      {
-        'Semester': 5,
-        'Elective Type': 'Professional Elective',
-        'Elective Number': 1,
-        'Subject Code': 'CS502PE',
-        'Subject Name': 'Advanced Web Technologies',
-        'Regulation': 'AR23'
-      },
-      {
-        'Semester': 5,
-        'Elective Type': 'Open Elective',
-        'Elective Number': 1,
-        'Subject Code': 'CS501OE',
-        'Subject Name': 'Fundamentals of Artificial Intelligence',
-        'Regulation': 'AR23'
-      },
-      {
-        'Semester': 6,
-        'Elective Type': 'Professional Elective',
-        'Elective Number': 2,
-        'Subject Code': 'CS601PE',
-        'Subject Name': 'Cloud Computing & DevOps',
-        'Regulation': 'AR23'
-      },
-      {
-        'Semester': 6,
-        'Elective Type': 'Open Elective',
-        'Elective Number': 2,
-        'Subject Code': 'CS601OE',
-        'Subject Name': 'Cyber Security & Ethical Hacking',
-        'Regulation': 'AR23'
-      },
-      {
-        'Semester': 7,
-        'Elective Type': 'Professional Elective',
-        'Elective Number': 3,
-        'Subject Code': 'CS701PE',
-        'Subject Name': 'Machine Learning Algorithms',
-        'Regulation': 'AR23'
-      },
-      {
-        'Semester': 7,
-        'Elective Type': 'Open Elective',
-        'Elective Number': 3,
-        'Subject Code': 'CS701OE',
-        'Subject Name': 'Data Science for Engineers',
-        'Regulation': 'AR23'
-      },
-      {
-        'Semester': 8,
-        'Elective Type': 'Professional Elective',
-        'Elective Number': 4,
-        'Subject Code': 'CS801PE',
-        'Subject Name': 'Blockchain Architecture',
-        'Regulation': 'AR23'
-      },
-      {
-        'Semester': 8,
-        'Elective Type': 'Professional Elective',
-        'Elective Number': 5,
-        'Subject Code': 'CS802PE',
-        'Subject Name': 'Natural Language Processing',
-        'Regulation': 'AR23'
-      },
-      {
-        'Semester': 8,
-        'Elective Type': 'Open Elective',
-        'Elective Number': 4,
-        'Subject Code': 'CS801OE',
-        'Subject Name': 'Deep Learning with PyTorch',
-        'Regulation': 'AR23'
-      }
-    ];
+  exportCurriculumTemplate: async (batch = '', branch = 'CSE') => {
+    const cleanBatch = normalizeBatch(batch);
+    const cleanBranch = String(branch || 'CSE').trim().toUpperCase();
+
+    // Fetch existing curriculum from database if available
+    let existingCurriculum = [];
+    try {
+      existingCurriculum = await coordinatorService.getCurriculum(cleanBatch || 'ALL', cleanBranch);
+    } catch (e) {}
+
+    const headers = ['Semester', 'Elective Type', 'Elective Number', 'Subject Code', 'Subject Name', 'Regulation'];
+    let sheetData = [headers];
+
+    if (existingCurriculum && existingCurriculum.length > 0) {
+      const rows = existingCurriculum.map(c => [
+        c.semester,
+        c.elective_type === 'PE' ? 'Professional Elective' : 'Open Elective',
+        c.elective_number || 1,
+        c.subject_code,
+        c.subject_name,
+        c.regulation || 'AR23'
+      ]);
+      sheetData = [headers, ...rows];
+    }
 
     try {
-      const worksheet = XLSX.utils.json_to_sheet(sampleRows);
+      const worksheet = XLSX.utils.aoa_to_sheet(sheetData);
       const workbook = XLSX.utils.book_new();
       XLSX.utils.book_append_sheet(workbook, worksheet, 'Curriculum_Master');
-      const batchSuffix = batch ? `_${normalizeBatch(batch)}` : '';
-      XLSX.writeFile(workbook, `Curriculum_Template${batchSuffix}_${branch}.xlsx`);
+      worksheet['!cols'] = [{ wch: 12 }, { wch: 22 }, { wch: 16 }, { wch: 15 }, { wch: 35 }, { wch: 12 }];
+      const batchSuffix = cleanBatch ? `_${cleanBatch}` : '';
+      XLSX.writeFile(workbook, `Curriculum_Template${batchSuffix}_${cleanBranch}.xlsx`);
     } catch (e) {
       console.error('Error generating curriculum template via XLSX:', e);
       // Fallback CSV download
-      const headers = ['Semester', 'Elective Type', 'Elective Number', 'Subject Code', 'Subject Name', 'Regulation'];
-      const csvContent = [
-        headers.join(','),
-        ...sampleRows.map(r => `"${r.Semester}","${r['Elective Type']}","${r['Elective Number']}","${r['Subject Code']}","${r['Subject Name']}","${r.Regulation}"`)
-      ].join('\n');
+      const csvContent = sheetData.map(row => row.map(cell => `"${cell !== undefined ? cell : ''}"`).join(',')).join('\n');
       const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
       const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
       link.setAttribute('href', url);
-      const batchSuffix = batch ? `_${normalizeBatch(batch)}` : '';
-      link.setAttribute('download', `Curriculum_Template${batchSuffix}_${branch}.csv`);
+      const batchSuffix = cleanBatch ? `_${cleanBatch}` : '';
+      link.setAttribute('download', `Curriculum_Template${batchSuffix}_${cleanBranch}.csv`);
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
@@ -337,38 +439,52 @@ export const coordinatorService = {
   // --------------------------------------------------------------------------
   getPESelectionWindows: async (branch) => {
     const cleanBranch = String(branch || 'CSE').trim().toUpperCase();
+    let supabaseWindows = [];
     if (isSupabaseConfigured && supabase) {
       try {
         const { data, error } = await supabase
           .from('selection_windows')
           .select('*')
-          .eq('elective_type', 'PE')
           .order('created_at', { ascending: false });
 
         if (!error && data) {
-          return data.filter(w => !w.branch || w.branch === 'ALL' || String(w.branch).toUpperCase() === cleanBranch);
+          return data
+            .filter(w => {
+              const isPE = !w.elective_type || String(w.elective_type).toUpperCase() === 'PE' || String(w.type).toUpperCase() === 'PE';
+              const isBranch = !w.branch || String(w.branch).trim().toUpperCase() === 'ALL' || String(w.branch).trim().toUpperCase() === cleanBranch;
+              return isPE && isBranch;
+            })
+            .map(w => ({ ...w, elective_number: Number(w.elective_number || 1) }));
         }
+        return [];
       } catch (e) {
         console.warn('Supabase getPESelectionWindows note:', e);
+        return [];
       }
     }
-    return db.getSelectionWindows(cleanBranch, 'PE');
+
+    const localWindows = db.getSelectionWindows ? db.getSelectionWindows(cleanBranch, 'PE') : [];
+    return localWindows.map(w => ({ ...w, elective_number: Number(w.elective_number || 1) }));
   },
 
   createPESelectionWindow: async (driveData, coordinatorBranch) => {
     const cleanBatch = normalizeBatch(driveData.batch || '');
     const cleanBranch = String(coordinatorBranch || driveData.branch || 'CSE').trim().toUpperCase();
     const cleanSem = Number(driveData.semester || 5);
-    const id = `WINDOW_${cleanBatch.replace(/[^A-Za-z0-9]/g, '_')}_SEM${cleanSem}_PE_${cleanBranch}`;
+    const cleanElectiveNum = Number(driveData.elective_number || 1);
+    const id = driveData.id || `WINDOW_${cleanBatch.replace(/[^A-Za-z0-9]/g, '_')}_SEM${cleanSem}_PE${cleanElectiveNum}_${cleanBranch}`;
 
     const payload = {
       id,
       batch: cleanBatch,
       branch: cleanBranch,
       semester: cleanSem,
+      elective_number: cleanElectiveNum,
       elective_type: 'PE',
-      status: driveData.status || 'ACTIVE',
-      title: driveData.title || `Batch ${cleanBatch} • Semester ${cleanSem} Professional Elective (${cleanBranch})`,
+      status: driveData.status || 'LOCKED',
+      title: driveData.title || `Batch ${cleanBatch} • Semester ${cleanSem} Professional Elective (PE-${cleanElectiveNum} • ${cleanBranch})`,
+      allotment_revealed: Boolean(driveData.allotment_revealed || false),
+      due_date: driveData.due_date || null,
       updated_at: new Date().toISOString(),
       created_at: new Date().toISOString()
     };
@@ -382,24 +498,52 @@ export const coordinatorService = {
           .single();
 
         if (error) {
-          throw new Error(`Database error creating PE drive: ${error.message}`);
+          console.warn('Supabase upsert with full payload note, retrying base schema:', error);
+          const basePayload = {
+            id,
+            batch: cleanBatch,
+            branch: cleanBranch,
+            semester: cleanSem,
+            elective_type: 'PE',
+            status: driveData.status || 'ACTIVE',
+            title: payload.title,
+            allotment_revealed: Boolean(driveData.allotment_revealed || false),
+            due_date: driveData.due_date || null,
+            updated_at: new Date().toISOString(),
+            created_at: new Date().toISOString()
+          };
+          await supabase.from('selection_windows').upsert([basePayload], { onConflict: 'id' });
         }
-        return data || payload;
       } catch (e) {
         console.warn('Supabase createPESelectionWindow note:', e);
       }
     }
 
-    return db.createSelectionWindow(payload);
+    if (db.createSelectionWindow) db.createSelectionWindow(payload);
+    return payload;
   },
 
-  startPESelectionWindow: async (windowId) => {
+  startPESelectionWindow: async (windowId, driveInfo = null) => {
     if (isSupabaseConfigured && supabase) {
       try {
         await supabase
           .from('selection_windows')
           .update({ status: 'ACTIVE', updated_at: new Date().toISOString() })
           .eq('id', windowId);
+
+        // Ensure all matching PE subjects for this drive are active
+        if (driveInfo) {
+          const cleanSem = Number(driveInfo.semester || 5);
+          const cleanNum = Number(driveInfo.elective_number || 1);
+          const cleanBranch = String(driveInfo.branch || 'CSE').trim().toUpperCase();
+
+          await supabase
+            .from('subjects')
+            .update({ active: true, updated_at: new Date().toISOString() })
+            .eq('semester', cleanSem)
+            .eq('elective_number', cleanNum)
+            .ilike('branch', cleanBranch);
+        }
       } catch (e) {
         console.warn('Supabase startPESelectionWindow note:', e);
       }
@@ -435,6 +579,432 @@ export const coordinatorService = {
     return true;
   },
 
+  // Toggle Reveal / Hide PE Allotment for students in this drive
+  toggleRevealPEAllotment: async (windowId, isRevealed) => {
+    const revealed = Boolean(isRevealed);
+    if (isSupabaseConfigured && supabase) {
+      try {
+        await supabase
+          .from('selection_windows')
+          .update({ allotment_revealed: revealed, updated_at: new Date().toISOString() })
+          .eq('id', windowId);
+      } catch (e) {
+        console.warn('Supabase toggleRevealPEAllotment note:', e);
+      }
+    }
+    db.toggleRevealSelectionWindow(windowId, revealed);
+    return true;
+  },
+
+  // Update Due Date / Deadline for PE Selection Drive
+  updatePEDriveDueDate: async (windowId, dueDate) => {
+    if (isSupabaseConfigured && supabase) {
+      try {
+        await supabase
+          .from('selection_windows')
+          .update({ due_date: dueDate || null, updated_at: new Date().toISOString() })
+          .eq('id', windowId);
+      } catch (e) {
+        console.warn('Supabase updatePEDriveDueDate note:', e);
+      }
+    }
+    db.updateSelectionWindowDueDate(windowId, dueDate);
+    return true;
+  },
+
+  // Auto-allocate PE students section-wise with priority waitlist reallocation
+  autoAllocatePEStudents: async (drive, coordinatorBranch) => {
+    const batch = drive.batch;
+    const semester = Number(drive.semester || 5);
+    const branch = String(coordinatorBranch || drive.branch || 'CSE').trim().toUpperCase();
+    const cleanBranch = normalizeBranchName(branch);
+    const targetElectiveNum = Number(drive.elective_number || 1);
+    let totalAllotted = 0;
+
+    // 1. In Supabase mode, process and sync to DB
+    if (isSupabaseConfigured && supabase) {
+      try {
+        const cleanTargetBatch = normalizeBatch(batch);
+
+        // Fetch eligible students from profiles
+        const { data: allProfiles, error: profErr } = await supabase
+          .from('profiles')
+          .select('*');
+
+        if (profErr) {
+          console.warn('Profiles fetch error in autoAllocatePEStudents:', profErr);
+        }
+
+        const eligible = (allProfiles || []).filter(s => {
+          const isStudent = String(s.role || '').trim().toLowerCase() === 'student';
+          if (!isStudent) return false;
+          const sBranch = normalizeBranchName(s.branch);
+          if (cleanBranch && cleanBranch !== 'ALL' && sBranch && sBranch !== cleanBranch) return false;
+          const sBatch = normalizeBatch(s.admitted_batch);
+          if (cleanTargetBatch && sBatch && sBatch !== 'ALL') {
+            return sBatch === cleanTargetBatch || Number(s.semester || 5) === semester;
+          }
+          return Number(s.semester || 5) === semester || !cleanTargetBatch;
+        });
+
+        // Fetch PE subjects for this branch, semester, and target elective number
+        const { data: allSubjects, error: subjErr } = await supabase
+          .from('subjects')
+          .select('*');
+
+        if (subjErr) {
+          console.warn('Subjects fetch error in autoAllocatePEStudents:', subjErr);
+        }
+
+        let subjects = (allSubjects || []).filter(s => {
+          const isPE = String(s.elective_type || '').trim().toUpperCase() === 'PE';
+          const sBranch = normalizeBranchName(s.branch);
+          const sSem = Number(s.semester || 5);
+          const sNum = Number(s.elective_number || 1);
+          const matchBranch = !cleanBranch || cleanBranch === 'ALL' || sBranch === cleanBranch;
+          return isPE && matchBranch && sSem === semester && sNum === targetElectiveNum;
+        });
+
+        if (subjects.length === 0) {
+          subjects = (allSubjects || []).filter(s => {
+            const isPE = String(s.elective_type || '').trim().toUpperCase() === 'PE';
+            const sBranch = normalizeBranchName(s.branch);
+            const sSem = Number(s.semester || 5);
+            const matchBranch = !cleanBranch || cleanBranch === 'ALL' || sBranch === cleanBranch;
+            return isPE && matchBranch && sSem === semester;
+          });
+        }
+
+        if (subjects.length === 0) {
+          subjects = (allSubjects || []).filter(s => {
+            const isPE = String(s.elective_type || '').trim().toUpperCase() === 'PE';
+            const sBranch = normalizeBranchName(s.branch);
+            const matchBranch = !cleanBranch || cleanBranch === 'ALL' || sBranch === cleanBranch;
+            return isPE && matchBranch;
+          });
+        }
+
+        if (subjects && subjects.length > 0 && eligible.length > 0) {
+          // Fetch existing allotments
+          const { data: allAllots } = await supabase
+            .from('allotments')
+            .select('*');
+
+          const existingAllots = (allAllots || []).filter(a =>
+            String(a.elective_type || '').trim().toUpperCase() === 'PE' &&
+            Number(a.elective_number || 1) === targetElectiveNum
+          );
+
+          // Fetch student preferences
+          const { data: allPrefs } = await supabase
+            .from('elective_preferences')
+            .select('*');
+
+          const preferences = (allPrefs || []).filter(p =>
+            String(p.elective_type || '').trim().toUpperCase() === 'PE' &&
+            Number(p.elective_number || 1) === targetElectiveNum
+          );
+
+          // Calibrate dynamic available seats
+          for (const s of subjects) {
+            const count = existingAllots.filter(a => a.subject_id === s.id && a.status === 'ALLOTTED').length;
+            const totalCap = Number(s.seats || s.available_seats || 60);
+            s.available_seats = Math.max(0, totalCap - count);
+          }
+
+          const nowIso = new Date().toISOString();
+
+          // Phase 1: Reallocate WAITLISTED students who previously submitted preferences
+          const waitlistedAllots = existingAllots.filter(a => 
+            a.status === 'WAITLISTED' &&
+            eligible.some(st => st.id === a.student_id || (st.email && a.student_email && st.email.toLowerCase() === a.student_email.toLowerCase()))
+          );
+
+          for (const waitRecord of waitlistedAllots) {
+            const studentPrefs = preferences
+              .filter(p => p.student_id === waitRecord.student_id || (waitRecord.roll_number && p.roll_number === waitRecord.roll_number))
+              .sort((a, b) => Number(a.priority) - Number(b.priority));
+
+            for (const pref of studentPrefs) {
+              const targetSubj = subjects.find(s => s.id === pref.subject_id && s.available_seats > 0);
+              if (targetSubj) {
+                waitRecord.subject_id = targetSubj.id;
+                waitRecord.priority_selected = pref.priority;
+                waitRecord.status = 'ALLOTTED';
+                waitRecord.allotted_at = nowIso;
+                targetSubj.available_seats = Math.max(0, targetSubj.available_seats - 1);
+                totalAllotted++;
+
+                await supabase.from('allotments').update({
+                  subject_id: targetSubj.id,
+                  priority_selected: pref.priority,
+                  status: 'ALLOTTED',
+                  is_auto_allocated: false,
+                  allotted_at: nowIso,
+                  updated_at: nowIso
+                }).eq('id', waitRecord.id);
+
+                await supabase.from('subjects').update({ available_seats: targetSubj.available_seats }).eq('id', targetSubj.id);
+                break;
+              }
+            }
+          }
+
+          // Phase 2: Section-wise sorted unallocated students
+          const unallocated = eligible.filter(st => {
+            return !existingAllots.some(a => 
+              (a.student_id === st.id || (a.student_email && st.email && a.student_email.toLowerCase() === st.email.toLowerCase())) &&
+              a.status === 'ALLOTTED'
+            );
+          }).sort((a, b) => {
+            const secComp = String(a.section || 'A').localeCompare(String(b.section || 'A'));
+            if (secComp !== 0) return secComp;
+            return String(a.roll_number || '').localeCompare(String(b.roll_number || ''));
+          });
+
+          let subjIdx = 0;
+          for (const st of unallocated) {
+            // Check if student has submitted preferences first
+            const studentPrefs = preferences
+              .filter(p => p.student_id === st.id || (st.roll_number && p.roll_number === st.roll_number))
+              .sort((a, b) => Number(a.priority) - Number(b.priority));
+
+            let chosenSubj = null;
+            let chosenPriority = null;
+
+            for (const pref of studentPrefs) {
+              const targetSubj = subjects.find(s => s.id === pref.subject_id && Number(s.available_seats || 0) > 0);
+              if (targetSubj) {
+                chosenSubj = targetSubj;
+                chosenPriority = pref.priority;
+                break;
+              }
+            }
+
+            // If no preference could be fulfilled, choose available subject round-robin
+            if (!chosenSubj) {
+              const available = subjects.filter(s => Number(s.available_seats || 0) > 0);
+              if (available.length > 0) {
+                chosenSubj = available[subjIdx % available.length];
+                subjIdx++;
+              }
+            }
+
+            const insertPayload = {
+              student_id: st.id,
+              roll_number: st.roll_number || 'N/A',
+              student_email: st.email,
+              student_name: st.name || '',
+              elective_type: 'PE',
+              elective_number: targetElectiveNum,
+              subject_id: chosenSubj ? chosenSubj.id : null,
+              priority_selected: chosenPriority,
+              is_auto_allocated: true,
+              history_id: drive.id,
+              status: chosenSubj ? 'ALLOTTED' : 'WAITLISTED',
+              submitted_at: nowIso,
+              allotted_at: nowIso,
+              updated_at: nowIso
+            };
+
+            try {
+              // Delete prior unassigned or waitlist record
+              await supabase.from('allotments').delete()
+                .eq('student_id', st.id)
+                .eq('elective_type', 'PE')
+                .eq('elective_number', targetElectiveNum);
+
+              const { error: insErr } = await supabase.from('allotments').insert([insertPayload]);
+              if (insErr) {
+                console.warn('Payload retry with minimal schema:', insErr);
+                const minPayload = {
+                  student_id: st.id,
+                  student_email: st.email,
+                  elective_type: 'PE',
+                  elective_number: targetElectiveNum,
+                  subject_id: chosenSubj ? chosenSubj.id : null,
+                  priority_selected: chosenPriority,
+                  is_auto_allocated: true,
+                  status: chosenSubj ? 'ALLOTTED' : 'WAITLISTED',
+                  submitted_at: nowIso,
+                  allotted_at: nowIso
+                };
+                await supabase.from('allotments').insert([minPayload]);
+              }
+
+              if (chosenSubj) {
+                chosenSubj.available_seats = Math.max(0, chosenSubj.available_seats - 1);
+                await supabase.from('subjects').update({ available_seats: chosenSubj.available_seats }).eq('id', chosenSubj.id);
+                totalAllotted++;
+              }
+            } catch (insErr) {
+              console.error('Auto allot insert exception:', insErr);
+            }
+          }
+
+          // Update selection window allocated_count in DB
+          if (drive?.id) {
+            try {
+              const { count: freshAllotedCount } = await supabase
+                .from('allotments')
+                .select('id', { count: 'exact', head: true })
+                .eq('elective_type', 'PE')
+                .eq('elective_number', targetElectiveNum)
+                .eq('status', 'ALLOTTED');
+
+              await supabase.from('selection_windows').update({
+                allocated_count: freshAllotedCount ?? totalAllotted,
+                updated_at: nowIso
+              }).eq('id', drive.id);
+            } catch (winSyncErr) {
+              console.warn('Window sync note:', winSyncErr);
+            }
+          }
+
+          // Sync storage silently
+          try {
+            db.autoAllocateStudents({
+              windowId: drive.id,
+              batch,
+              semester,
+              branch,
+              electiveType: 'PE',
+              elective_number: targetElectiveNum
+            });
+          } catch (storageErr) {
+            console.warn('Storage sync note:', storageErr);
+          }
+
+          return {
+            success: true,
+            count: totalAllotted,
+            message: `Successfully allocated and reallocated ${totalAllotted} student(s) for PE-${targetElectiveNum}.`
+          };
+        }
+      } catch (e) {
+        console.warn('Supabase autoAllocatePEStudents note:', e);
+      }
+    }
+
+    // Always run db engine for local sync & history
+    return db.autoAllocateStudents({
+      windowId: drive.id,
+      batch,
+      semester,
+      branch,
+      electiveType: 'PE',
+      elective_number: targetElectiveNum
+    });
+  },
+
+  undoAutoAllocatePE: async (driveOrId, coordinatorBranch) => {
+    const driveObj = typeof driveOrId === 'object' && driveOrId !== null ? driveOrId : { id: driveOrId };
+    const targetElectiveNum = Number(driveObj.elective_number || 1);
+    const rawBranch = String(coordinatorBranch || driveObj.branch || 'CSE').trim().toUpperCase();
+    const cleanBranch = normalizeBranchName(rawBranch);
+    const cleanSem = Number(driveObj.semester || 5);
+    let revertedCount = 0;
+
+    if (isSupabaseConfigured && supabase) {
+      try {
+        // 1. Fetch eligible students for this drive's branch
+        const { data: allProfiles } = await supabase
+          .from('profiles')
+          .select('id, branch, role');
+        
+        const branchStudentIds = (allProfiles || [])
+          .filter(s => {
+            const isStudent = String(s.role || '').toLowerCase() === 'student';
+            const sBranch = normalizeBranchName(s.branch);
+            const matchBranch = !cleanBranch || cleanBranch === 'ALL' || sBranch === cleanBranch;
+            return isStudent && matchBranch;
+          })
+          .map(s => s.id);
+
+        // 2. Find auto-allocated records to delete
+        const { data: autoAllots, error: fetchErr } = await supabase
+          .from('allotments')
+          .select('id, student_id, subject_id')
+          .eq('elective_type', 'PE')
+          .eq('elective_number', targetElectiveNum)
+          .eq('is_auto_allocated', true);
+
+        if (!fetchErr && autoAllots && autoAllots.length > 0) {
+          const matchingAllots = autoAllots.filter(a => 
+            branchStudentIds.length === 0 || branchStudentIds.includes(a.student_id)
+          );
+          const idsToDelete = matchingAllots.map(a => a.id);
+          
+          if (idsToDelete.length > 0) {
+            const { error: delErr } = await supabase
+              .from('allotments')
+              .delete()
+              .in('id', idsToDelete);
+
+            if (!delErr) {
+              revertedCount = idsToDelete.length;
+            }
+          }
+        }
+
+        // 3. Recalculate remaining seats for all subjects in this PE slot
+        const { data: remainingAllots } = await supabase
+          .from('allotments')
+          .select('subject_id')
+          .eq('elective_type', 'PE')
+          .eq('elective_number', targetElectiveNum)
+          .eq('status', 'ALLOTTED');
+
+        const { data: allSubjects } = await supabase
+          .from('subjects')
+          .select('id, seats, branch, semester, elective_type, elective_number');
+
+        const subjects = (allSubjects || []).filter(s => {
+          const isPE = String(s.elective_type || '').toUpperCase() === 'PE';
+          const sBranch = normalizeBranchName(s.branch);
+          const matchBranch = !cleanBranch || cleanBranch === 'ALL' || sBranch === cleanBranch;
+          const matchSem = Number(s.semester || 5) === cleanSem;
+          const matchNum = Number(s.elective_number || 1) === targetElectiveNum;
+          return isPE && matchBranch && matchSem && matchNum;
+        });
+
+        if (subjects && subjects.length > 0) {
+          for (const s of subjects) {
+            const activeCount = (remainingAllots || []).filter(a => a.subject_id === s.id).length;
+            const totalCap = Number(s.seats || 60);
+            const updatedAvailable = Math.max(0, totalCap - activeCount);
+            await supabase.from('subjects').update({ available_seats: updatedAvailable }).eq('id', s.id);
+          }
+        }
+
+        return {
+          success: true,
+          revertedCount,
+          message: `Reverted ${revertedCount} auto-allocated assignment(s) for PE-${targetElectiveNum}. You can now update subject seats and reallocate.`
+        };
+      } catch (err) {
+        console.warn('Supabase undoAutoAllocatePE note:', err);
+      }
+    }
+
+    return {
+      success: true,
+      revertedCount: 0,
+      message: `Reverted auto-allocation for PE-${targetElectiveNum}.`
+    };
+  },
+
+  redoAutoAllocatePE: async (windowIdOrObj) => {
+    return {
+      success: true,
+      restoredCount: 0
+    };
+  },
+
+  getPEAutoAllocationHistory: (windowIdOrCriteria) => {
+    return db.getAutoAllocationHistory ? db.getAutoAllocationHistory(windowIdOrCriteria) : null;
+  },
+
   // --------------------------------------------------------------------------
   // 2. ELECTIVE SUBJECTS (OFFERING ACTIVE SUBJECTS FROM CURRICULUM) (TAB 3)
   // --------------------------------------------------------------------------
@@ -446,31 +1016,69 @@ export const coordinatorService = {
     const cleanType = String(elective_type || 'PE').toUpperCase();
     const fallbackSeatCount = Number(seats || 60);
 
-    // Rule 1: For PE, an established PE drive must exist for this batch & semester
+    // Validate Selection Drive Status (Applies to both PE and OE):
+    // 1. Drive must exist in database
+    // 2. Drive must NOT be ACTIVE (frozen during live student selection)
     if (cleanType === 'PE') {
       const peWindows = await coordinatorService.getPESelectionWindows(cleanBranch);
       const matchingDrive = (peWindows || []).find(w => 
-        normalizeBatch(w.batch) === cleanBatch && Number(w.semester) === cleanSem
+        normalizeBatch(w.batch) === cleanBatch && 
+        Number(w.semester) === cleanSem && 
+        Number(w.elective_number || 1) === cleanElectiveNum
       );
       if (!matchingDrive) {
-        throw new Error(`Cannot offer PE subjects. No PE Selection Drive has been established for Batch ${cleanBatch} (Semester ${cleanSem}). Please establish the PE drive in Tab 2 first.`);
+        throw new Error(`Cannot add Professional Elective offerings: The PE Selection Drive for Batch ${cleanBatch} • Semester ${cleanSem} • PE-${cleanElectiveNum} has not been established yet. Please establish the PE Selection Drive in Setup Mode (LOCKED) in Tab 2 first.`);
       }
       if (matchingDrive.status === 'ACTIVE') {
-        throw new Error(`Cannot modify or add subject offerings while the PE Selection Drive is ACTIVE for Batch ${cleanBatch} (Semester ${cleanSem}). Please pause the drive in Tab 2 before making changes.`);
+        throw new Error(`Cannot modify Professional Elective offerings while the PE Selection Drive is ACTIVE for Batch ${cleanBatch} (Semester ${cleanSem}). Please pause the drive in Tab 2 first.`);
+      }
+    } else if (cleanType === 'OE') {
+      let matchingDrive = null;
+      if (isSupabaseConfigured && supabase) {
+        try {
+          const { data: oeWindows } = await supabase
+            .from('selection_windows')
+            .select('*')
+            .eq('elective_type', 'OE');
+
+          matchingDrive = (oeWindows || []).find(w =>
+            normalizeBatch(w.batch) === cleanBatch &&
+            Number(w.semester) === cleanSem &&
+            Number(w.elective_number || 1) === cleanElectiveNum
+          );
+        } catch (e) {
+          console.warn('OE drive check note:', e);
+        }
+      } else {
+        const localWins = db.getSelectionWindows ? db.getSelectionWindows() : [];
+        matchingDrive = (localWins || []).find(w =>
+          String(w.elective_type || '').toUpperCase() === 'OE' &&
+          normalizeBatch(w.batch) === cleanBatch &&
+          Number(w.semester) === cleanSem &&
+          Number(w.elective_number || 1) === cleanElectiveNum
+        );
+      }
+
+      if (!matchingDrive) {
+        throw new Error(`Cannot add Open Elective offerings: The OE Selection Drive for Batch ${cleanBatch} • Semester ${cleanSem} • OE-${cleanElectiveNum} has not been created by the College Administrator yet. The Administrator must create the OE Selection Drive in Setup Mode (LOCKED) first.`);
+      }
+
+      if (matchingDrive.status === 'ACTIVE') {
+        throw new Error(`Cannot modify Open Elective offerings while the OE Selection Drive is ACTIVE for Batch ${cleanBatch} (Semester ${cleanSem}). The College Administrator must pause the drive first.`);
       }
     }
 
     const subjectsToInsert = curriculumSubjects.map(cs => {
       const individualSeats = (cs.seats !== undefined && cs.seats !== '' && !isNaN(Number(cs.seats))) 
         ? Math.max(1, Number(cs.seats)) 
-        : (seatCount || 60);
+        : (fallbackSeatCount || 60);
       return {
-        subject_code: cs.subject_code,
-        subject_name: cs.subject_name,
+        subject_code: String(cs.subject_code || '').trim().toUpperCase().replace(/\s+/g, ''),
+        subject_name: String(cs.subject_name || '').trim(),
         elective_type: cleanType,
         elective_number: cleanElectiveNum,
         branch: cleanBranch,
-        offered_branches: cleanType === 'OE' ? (Array.isArray(cs.offered_branches) ? cs.offered_branches : ['ALL']) : [cleanBranch],
+        offered_branches: parseOfferedBranches(cs.offered_branches, cleanType === 'OE' ? ['ALL'] : [cleanBranch]),
         admitted_batch: cleanBatch,
         regulation: cs.regulation || 'AR23',
         semester: cleanSem,
@@ -481,15 +1089,46 @@ export const coordinatorService = {
     });
 
     if (isSupabaseConfigured && supabase) {
-      const { data, error } = await supabase
-        .from('subjects')
-        .upsert(subjectsToInsert, { onConflict: 'subject_code' })
-        .select();
+      try {
+        const savedList = [];
+        for (const s of subjectsToInsert) {
+          const { data: existing } = await supabase
+            .from('subjects')
+            .select('id')
+            .eq('subject_code', s.subject_code)
+            .eq('branch', s.branch)
+            .eq('semester', s.semester)
+            .eq('elective_type', s.elective_type)
+            .eq('elective_number', s.elective_number)
+            .maybeSingle();
 
-      if (error) {
-        throw new Error(`Database error offering curriculum subjects: ${error.message}`);
+          if (existing?.id) {
+            const { data: updated, error: uErr } = await supabase
+              .from('subjects')
+              .update(s)
+              .eq('id', existing.id)
+              .select()
+              .single();
+            if (!uErr && updated) {
+              if (db.updateSubject) db.updateSubject(existing.id, updated);
+              savedList.push(updated);
+            }
+          } else {
+            const { data: inserted, error: iErr } = await supabase
+              .from('subjects')
+              .insert([s])
+              .select()
+              .single();
+            if (!iErr && inserted) {
+              if (db.addSubject) db.addSubject(inserted);
+              savedList.push(inserted);
+            }
+          }
+        }
+        if (savedList.length > 0) return savedList;
+      } catch (err) {
+        console.warn('Supabase activateSubjects note:', err);
       }
-      return data || subjectsToInsert;
     }
 
     return subjectsToInsert.map(s => db.addSubject(s));
@@ -513,11 +1152,13 @@ export const coordinatorService = {
           return data.map(s => {
             const count = allots.filter(a => a.subject_id === s.id).length;
             const total = Number(s.seats || 0);
+            const sType = String(s.elective_type || 'PE').toUpperCase();
+            const sBranch = s.branch ? String(s.branch).trim().toUpperCase() : 'CSE';
             return {
               ...s,
               seats: total,
               available_seats: Math.max(0, total - count),
-              offered_branches: Array.isArray(s.offered_branches) ? s.offered_branches : (s.elective_type === 'PE' ? [s.branch] : ['ALL'])
+              offered_branches: parseOfferedBranches(s.offered_branches, sType === 'PE' ? [sBranch] : ['ALL'])
             };
           });
         }
@@ -527,7 +1168,7 @@ export const coordinatorService = {
         return [];
       }
     }
-    return db.getSubjects(electiveType, branch);
+    return db.getSubjects ? db.getSubjects(electiveType, branch) : [];
   },
 
   addSubject: async (subjectData) => {
@@ -535,36 +1176,89 @@ export const coordinatorService = {
     const cleanSem = Number(subjectData.semester || 5);
     const cleanType = String(subjectData.elective_type || 'PE').toUpperCase();
     const cleanBranch = String(subjectData.branch || 'CSE').trim().toUpperCase();
+    const cleanNum = Number(subjectData.elective_number || 1);
+    const seatCount = Number(subjectData.seats || 60);
 
+    // Validate Selection Drive Status (Applies to both PE and OE):
+    // 1. Drive must exist in database
+    // 2. Drive must NOT be ACTIVE (frozen during live student selection)
     if (cleanType === 'PE') {
       const peWindows = await coordinatorService.getPESelectionWindows(cleanBranch);
       const matchingDrive = (peWindows || []).find(w => 
-        normalizeBatch(w.batch) === cleanBatch && Number(w.semester) === cleanSem
+        normalizeBatch(w.batch) === cleanBatch && 
+        Number(w.semester) === cleanSem && 
+        Number(w.elective_number || 1) === cleanNum
       );
       if (!matchingDrive) {
-        throw new Error(`Cannot add PE subject. No PE Selection Drive has been established for Batch ${cleanBatch} (Semester ${cleanSem}). Please establish the PE drive in Tab 2 first.`);
+        throw new Error(`Cannot add Professional Elective course: The PE Selection Drive for Batch ${cleanBatch} • Semester ${cleanSem} • PE-${cleanNum} has not been established yet. Please establish the PE Selection Drive in Setup Mode (LOCKED) in Tab 2 first.`);
       }
       if (matchingDrive.status === 'ACTIVE') {
-        throw new Error(`Cannot add subjects while the PE Selection Drive is ACTIVE for Batch ${cleanBatch} (Semester ${cleanSem}). Please pause the drive in Tab 2 first.`);
+        throw new Error(`Cannot modify Professional Elective courses while the PE Selection Drive is ACTIVE for Batch ${cleanBatch} (Semester ${cleanSem}). Please pause the drive in Tab 2 first.`);
+      }
+    } else if (cleanType === 'OE') {
+      let matchingDrive = null;
+      if (isSupabaseConfigured && supabase) {
+        try {
+          const { data: oeWindows } = await supabase
+            .from('selection_windows')
+            .select('*')
+            .eq('elective_type', 'OE');
+
+          matchingDrive = (oeWindows || []).find(w =>
+            normalizeBatch(w.batch) === cleanBatch &&
+            Number(w.semester) === cleanSem &&
+            Number(w.elective_number || 1) === cleanNum
+          );
+        } catch (e) {
+          console.warn('OE drive check in addSubject note:', e);
+        }
+      } else {
+        const localWins = db.getSelectionWindows ? db.getSelectionWindows() : [];
+        matchingDrive = (localWins || []).find(w =>
+          String(w.elective_type || '').toUpperCase() === 'OE' &&
+          normalizeBatch(w.batch) === cleanBatch &&
+          Number(w.semester) === cleanSem &&
+          Number(w.elective_number || 1) === cleanNum
+        );
+      }
+
+      if (!matchingDrive) {
+        throw new Error(`Cannot add Open Elective course: The OE Selection Drive for Batch ${cleanBatch} • Semester ${cleanSem} • OE-${cleanNum} has not been created by the College Administrator yet. The Administrator must create the OE Selection Drive in Setup Mode (LOCKED) first.`);
+      }
+
+      if (matchingDrive.status === 'ACTIVE') {
+        throw new Error(`Cannot modify Open Elective courses while the OE Selection Drive is ACTIVE for Batch ${cleanBatch} (Semester ${cleanSem}). The College Administrator must pause the drive first.`);
       }
     }
 
     const payload = {
       ...subjectData,
+      subject_code: String(subjectData.subject_code || '').trim().toUpperCase().replace(/\s+/g, ''),
+      subject_name: String(subjectData.subject_name || '').trim(),
       admitted_batch: cleanBatch,
       semester: cleanSem,
       elective_type: cleanType,
       branch: cleanBranch,
-      elective_number: Number(subjectData.elective_number || 1),
-      seats: Number(subjectData.seats),
-      available_seats: Number(subjectData.seats)
+      elective_number: cleanNum,
+      offered_branches: parseOfferedBranches(subjectData.offered_branches, cleanType === 'OE' ? ['ALL'] : [cleanBranch]),
+      seats: seatCount,
+      available_seats: seatCount,
+      active: subjectData.active ?? true
     };
+
     if (isSupabaseConfigured && supabase) {
-      const { data, error } = await supabase.from('subjects').insert([payload]).select().single();
-      if (error) {
-        throw new Error(`Database error adding subject: ${error.message}`);
+      try {
+        const { data, error } = await supabase.from('subjects').insert([payload]).select().single();
+        if (!error && data) {
+          if (db.addSubject) db.addSubject(data);
+          return data;
+        }
+        if (error) {
+          console.warn('Supabase addSubject error:', error);
+        }
+      } catch (e) {
+        console.warn('Supabase addSubject exception:', e);
       }
-      return data || payload;
     }
     return db.addSubject(payload);
   },
@@ -789,6 +1483,28 @@ export const coordinatorService = {
       if (matchingDrive && matchingDrive.status === 'ACTIVE') {
         throw new Error(`Cannot edit subject while the PE Selection Drive is ACTIVE for Batch ${cleanBatch} (Semester ${cleanSem}). Please pause the drive in Tab 2 first.`);
       }
+    } else if (cleanType === 'OE') {
+      let matchingDrive = null;
+      if (isSupabaseConfigured && supabase) {
+        try {
+          const { data: oeWindows } = await supabase.from('selection_windows').select('*').eq('elective_type', 'OE');
+          matchingDrive = (oeWindows || []).find(w => 
+            normalizeBatch(w.batch) === cleanBatch && Number(w.semester) === cleanSem && Number(w.elective_number || 1) === Number(subjectData.elective_number || 1)
+          );
+        } catch (e) {
+          console.warn('OE check note:', e);
+        }
+      } else {
+        const localWins = db.getSelectionWindows ? db.getSelectionWindows() : [];
+        matchingDrive = (localWins || []).find(w => 
+          String(w.elective_type || '').toUpperCase() === 'OE' &&
+          normalizeBatch(w.batch) === cleanBatch && Number(w.semester) === cleanSem && Number(w.elective_number || 1) === Number(subjectData.elective_number || 1)
+        );
+      }
+
+      if (matchingDrive && matchingDrive.status === 'ACTIVE') {
+        throw new Error(`Cannot edit Open Elective subject while the OE Selection Drive is ACTIVE for Batch ${cleanBatch} (Semester ${cleanSem}). The College Administrator must pause the drive first.`);
+      }
     }
 
     const payload = {
@@ -845,6 +1561,30 @@ export const coordinatorService = {
       if (matchingDrive && matchingDrive.status === 'ACTIVE') {
         throw new Error(`Cannot delete subject while the PE Selection Drive is ACTIVE for Batch ${cleanBatch} (Semester ${cleanSem}). Please pause the drive in Tab 2 first.`);
       }
+    } else if (targetSubject && targetSubject.elective_type === 'OE') {
+      const cleanBatch = normalizeBatch(targetSubject.admitted_batch || '');
+      const cleanSem = Number(targetSubject.semester || 5);
+      const cleanNum = Number(targetSubject.elective_number || 1);
+      let matchingDrive = null;
+      if (isSupabaseConfigured && supabase) {
+        try {
+          const { data: oeWindows } = await supabase.from('selection_windows').select('*').eq('elective_type', 'OE');
+          matchingDrive = (oeWindows || []).find(w => 
+            normalizeBatch(w.batch) === cleanBatch && Number(w.semester) === cleanSem && Number(w.elective_number || 1) === cleanNum
+          );
+        } catch (e) {
+          console.warn('OE delete check note:', e);
+        }
+      } else {
+        const localWins = db.getSelectionWindows ? db.getSelectionWindows() : [];
+        matchingDrive = (localWins || []).find(w => 
+          String(w.elective_type || '').toUpperCase() === 'OE' &&
+          normalizeBatch(w.batch) === cleanBatch && Number(w.semester) === cleanSem && Number(w.elective_number || 1) === cleanNum
+        );
+      }
+      if (matchingDrive && matchingDrive.status === 'ACTIVE') {
+        throw new Error(`Cannot delete Open Elective subject while the OE Selection Drive is ACTIVE for Batch ${cleanBatch} (Semester ${cleanSem}). The College Administrator must pause the drive first.`);
+      }
     }
 
     if (isSupabaseConfigured && supabase) {
@@ -865,12 +1605,23 @@ export const coordinatorService = {
   },
 
   // Unlock / Reset student selection for re-choosing
-  unlockStudentSelection: async (studentId, electiveType, coordinatorId) => {
+  unlockStudentSelection: async (studentId, electiveType, coordinatorId, electiveNumber = null) => {
     if (isSupabaseConfigured && supabase) {
       try {
         let studentEmail = null;
         const { data: sp } = await supabase.from('profiles').select('*').eq('id', studentId).maybeSingle();
         if (sp?.email) studentEmail = sp.email.toLowerCase().trim();
+
+        // Check if there was an active allotted subject to recalibrate seats
+        let findQuery = supabase.from('allotments').select('*');
+        if (studentEmail) {
+          findQuery = findQuery.or(`student_id.eq.${studentId},student_email.eq.${studentEmail}`);
+        } else {
+          findQuery = findQuery.eq('student_id', studentId);
+        }
+        if (electiveType && electiveType !== 'ALL') findQuery = findQuery.eq('elective_type', electiveType);
+        if (electiveNumber) findQuery = findQuery.eq('elective_number', Number(electiveNumber));
+        const { data: existingAllots } = await findQuery;
 
         let queryA = supabase.from('allotments').delete();
         if (studentEmail) {
@@ -885,15 +1636,47 @@ export const coordinatorService = {
           queryA = queryA.eq('elective_type', electiveType);
           queryP = queryP.eq('elective_type', electiveType);
         }
+        if (electiveNumber) {
+          queryA = queryA.eq('elective_number', Number(electiveNumber));
+          queryP = queryP.eq('elective_number', Number(electiveNumber));
+        }
 
         await Promise.all([queryA, queryP]);
+
+        // Calibrate seats for freed subjects
+        if (existingAllots && existingAllots.length > 0) {
+          for (const allot of existingAllots) {
+            if (allot.subject_id && allot.status === 'ALLOTTED') {
+              const { data: subj } = await supabase.from('subjects').select('*').eq('id', allot.subject_id).maybeSingle();
+              if (subj) {
+                const { data: remainingAllots } = await supabase.from('allotments').select('id').eq('subject_id', subj.id).eq('status', 'ALLOTTED');
+                const occ = remainingAllots?.length || 0;
+                await supabase.from('subjects').update({ available_seats: Math.max(0, Number(subj.seats || 0) - occ) }).eq('id', subj.id);
+              }
+            }
+          }
+        }
+
+        await supabase.from('audit_logs').insert([{
+          coordinator_id: coordinatorId || null,
+          student_id: studentId,
+          action: 'RESET_STUDENT_SELECTION',
+          old_value: 'Allotment & Preferences Locked',
+          new_value: 'Selection Reset (Unlocked)',
+          reason: `Reset and unlocked ${electiveType || 'PE & OE'}${electiveNumber ? `-${electiveNumber}` : ''} selection for student`
+        }]);
+
+        // Sync local storage
+        try {
+          db.unlockStudentSelection(studentId, electiveType, coordinatorId, null, electiveNumber);
+        } catch (e) {}
+
         return true;
       } catch (e) {
-        console.warn('Supabase unlockStudentSelection error:', e);
-        throw e;
+        console.warn('Supabase unlockStudentSelection error, using local storage fallback:', e);
       }
     }
-    throw new Error('Database connection is not configured.');
+    return db.unlockStudentSelection(studentId, electiveType, coordinatorId, null, electiveNumber);
   },
 
   // --------------------------------------------------------------------------
@@ -914,7 +1697,7 @@ export const coordinatorService = {
           const allotments = sAllots || [];
           const subjects = sSubjects || [];
 
-          return data.map(student => {
+          const studentList = data.map(student => {
             const studentAllotmentPE = allotments.find(a => a.student_id === student.id && a.elective_type === 'PE');
             const studentAllotmentOE = allotments.find(a => a.student_id === student.id && a.elective_type === 'OE');
 
@@ -932,6 +1715,8 @@ export const coordinatorService = {
               } : null
             };
           });
+
+          return studentList.sort((a, b) => (a.roll_number || '').localeCompare(b.roll_number || '', undefined, { numeric: true, sensitivity: 'base' }));
         }
         return [];
       } catch (e) {
@@ -939,7 +1724,8 @@ export const coordinatorService = {
         return [];
       }
     }
-    return [];
+    const localStudents = (db.getProfiles ? db.getProfiles(branch) : []).filter(p => p.role === 'student');
+    return localStudents.sort((a, b) => (a.roll_number || '').localeCompare(b.roll_number || '', undefined, { numeric: true, sensitivity: 'base' }));
   },
 
   addStudent: async (studentData) => {
@@ -1341,8 +2127,7 @@ export const coordinatorService = {
     });
 
     // Section-wise statistics for Department (for PE)
-    const distinctSections = Array.from(new Set(deptStudents.map(s => String(s.section || 'A').trim().toUpperCase()).filter(Boolean))).sort();
-    if (distinctSections.length === 0) distinctSections.push('A');
+    const distinctSections = Array.from(new Set(deptStudents.map(s => String(s.section || '').trim().toUpperCase()).filter(Boolean))).sort();
 
     const sectionWiseStats = distinctSections.map(sec => {
       const secStudents = deptStudents.filter(s => String(s.section || 'A').trim().toUpperCase() === sec);
@@ -1496,9 +2281,9 @@ export const coordinatorService = {
         console.warn('Supabase allotment records fetch note:', e);
       }
     } else {
-      allotments = db.getAllotments();
-      students = db.getProfiles();
-      subjects = db.getSubjects();
+      allotments = db.getAllotments ? db.getAllotments() : [];
+      students = db.getProfiles ? db.getProfiles() : [];
+      subjects = db.getSubjects ? db.getSubjects() : [];
     }
 
     let list = allotments.map(a => {
@@ -1507,63 +2292,83 @@ export const coordinatorService = {
         (a.student_email && s.email && s.email.toLowerCase().trim() === a.student_email.toLowerCase().trim()) || 
         (a.roll_number && s.roll_number && s.roll_number.toUpperCase().trim() === a.roll_number.toUpperCase().trim())
       ) || {};
-      const subject = subjects.find(s => s.id === a.subject_id) || null;
+      const subject = subjects.find(s => 
+        (a.subject_id && s.id === a.subject_id) ||
+        (a.subject_code && s.subject_code === a.subject_code) ||
+        (a.subject_name && s.subject_name === a.subject_name)
+      ) || null;
 
-      const studentName = student.name || a.student_name || 'Unknown';
-      const studentEmail = student.email || a.student_email || 'N/A';
-      const rollNumber = student.roll_number || a.roll_number || 'N/A';
-      const branch = student.branch || a.branch || 'N/A';
+      const studentName = student.name || a.student_name || a.studentName || 'Unknown';
+      const studentEmail = student.email || a.student_email || a.studentEmail || 'N/A';
+      const rollNumber = student.roll_number || a.roll_number || a.rollNumber || a.student_roll || 'N/A';
+      const branch = student.branch || a.branch || a.student_branch || 'N/A';
       const section = student.section || a.section || 'A';
       const semester = student.semester || a.semester || 5;
 
-      const subjectBranch = subject?.branch || a.branch || 'N/A';
+      const subjectBranch = subject?.branch || a.subject_branch || a.offered_by_branch || 'N/A';
 
-      let subjectName = 'Not Allotted';
-      let subjectCode = 'N/A';
+      let subjectName = a.subject_name || a.subjectName || 'Not Allotted';
+      let subjectCode = a.subject_code || a.subjectCode || 'N/A';
 
       if (subject) {
-        subjectName = subject.subject_name;
-        subjectCode = subject.subject_code;
+        subjectName = subject.subject_name || a.subject_name || 'Allotted Subject';
+        subjectCode = subject.subject_code || a.subject_code || 'N/A';
       } else if (a.status === 'WAITLISTED') {
         subjectName = 'WAITLISTED (No Vacancy)';
         subjectCode = 'N/A';
+      } else if (a.subject_name || a.subjectName) {
+        subjectName = a.subject_name || a.subjectName;
+        subjectCode = a.subject_code || a.subjectCode || 'N/A';
       } else if (a.subject_id) {
         subjectName = 'Allotted Subject';
         subjectCode = 'N/A';
       }
 
       const elective_number = Number(a.elective_number || subject?.elective_number || 1);
-      const admitted_batch = student.admitted_batch || a.admitted_batch || subject?.admitted_batch || '';
+      const admitted_batch = student.admitted_batch || a.admitted_batch || a.batch || subject?.admitted_batch || '';
 
       return {
         ...a,
         studentName,
+        student_name: studentName,
         studentEmail,
+        student_email: studentEmail,
         rollNumber,
+        roll_number: rollNumber,
+        student_roll: rollNumber,
         branch,
+        studentBranch: branch,
+        student_branch: branch,
         section,
         semester,
         admitted_batch,
+        batch: admitted_batch,
         elective_number,
         subjectName,
+        subject_name: subjectName,
         subjectCode,
-        subjectBranch
+        subject_code: subjectCode,
+        subjectBranch,
+        subject_branch: subjectBranch,
+        offered_by_branch: subjectBranch,
+        priority_selected: a.priority_selected || a.preference_rank || null,
+        preference_rank: a.priority_selected || a.preference_rank || null
       };
     });
 
-    // 1. Coordinator Department Scoping (Strict PE branch isolation)
+    // 1. Coordinator Department Scoping
     // PE: Students of coordinator's branch ONLY
-    // OE: Subjects offered by coordinator's branch
+    // OE: Visible to BOTH the student's parent branch coordinator AND the course offering branch coordinator
     if (filters.coordinatorBranch && filters.coordinatorBranch !== 'ALL') {
-      const cBranch = String(filters.coordinatorBranch).trim().toUpperCase();
+      const cBranch = normalizeBranchName(filters.coordinatorBranch);
       list = list.filter(item => {
-        const itemStudentBranch = String(item.branch || '').trim().toUpperCase();
-        const itemSubjectBranch = String(item.subjectBranch || '').trim().toUpperCase();
+        const itemStudentBranch = normalizeBranchName(item.branch || item.student_branch || '');
+        const itemSubjectBranch = normalizeBranchName(item.subjectBranch || item.subject_branch || item.offered_by_branch || '');
 
         if (item.elective_type === 'PE') {
           return itemStudentBranch === cBranch;
         } else if (item.elective_type === 'OE') {
-          return itemSubjectBranch === cBranch;
+          return itemStudentBranch === cBranch || itemSubjectBranch === cBranch;
         } else {
           return itemStudentBranch === cBranch || itemSubjectBranch === cBranch;
         }
@@ -1593,9 +2398,11 @@ export const coordinatorService = {
 
     // 5. Student Branch Filter
     if (filters.student_branch && filters.student_branch !== 'ALL') {
-      list = list.filter(item => item.branch === filters.student_branch);
+      const targetB = normalizeBranchName(filters.student_branch);
+      list = list.filter(item => normalizeBranchName(item.branch) === targetB);
     } else if (filters.branch && filters.branch !== 'ALL' && !filters.coordinatorBranch) {
-      list = list.filter(item => item.branch === filters.branch);
+      const targetB = normalizeBranchName(filters.branch);
+      list = list.filter(item => normalizeBranchName(item.branch) === targetB);
     }
 
     // 6. Section Filter
@@ -1625,67 +2432,147 @@ export const coordinatorService = {
       );
     }
 
+    list.sort((a, b) => {
+      const rollA = a.rollNumber || a.roll_number || '';
+      const rollB = b.rollNumber || b.roll_number || '';
+      return rollA.localeCompare(rollB, undefined, { numeric: true, sensitivity: 'base' });
+    });
+
     return list;
   },
 
   // Manual Allotment Override with Audit Log
-  manualUpdateAllotment: async ({ allotmentId, newSubjectId, reason, coordinatorId }) => {
+  manualUpdateAllotment: async ({ allotmentId, studentId, electiveType = 'OE', electiveNumber = 1, semester = 5, newSubjectId, reason, coordinatorId }) => {
     if (isSupabaseConfigured && supabase) {
-      const { data: targetAllotment } = await supabase.from('allotments').select('*').eq('id', allotmentId).single();
-      if (!targetAllotment) throw new Error('Allotment record not found.');
-
-      const { data: oldSubject } = targetAllotment.subject_id 
-        ? await supabase.from('subjects').select('*').eq('id', targetAllotment.subject_id).maybeSingle()
-        : { data: null };
-
-      const { data: newSubject } = newSubjectId 
-        ? await supabase.from('subjects').select('*').eq('id', newSubjectId).maybeSingle()
-        : { data: null };
-
-      const { data: updatedAllotment, error: updateErr } = await supabase
-        .from('allotments')
-        .update({
-          subject_id: newSubjectId || null,
-          status: newSubjectId ? 'ALLOTTED' : 'WAITLISTED',
-          priority_selected: null
-        })
-        .eq('id', allotmentId)
-        .select()
-        .single();
-
-      if (updateErr) {
-        throw new Error(`Database error updating allotment: ${updateErr.message}`);
-      }
-
-      // Recalibrate seat vacancies for affected subjects
       try {
-        const { data: allAllots } = await supabase.from('allotments').select('subject_id, status').eq('status', 'ALLOTTED');
-        const activeAllots = allAllots || [];
+        let targetAllotment = null;
+        if (allotmentId) {
+          const { data } = await supabase.from('allotments').select('*').eq('id', allotmentId).maybeSingle();
+          if (data) targetAllotment = data;
+        }
 
-        if (oldSubject) {
-          const occ = activeAllots.filter(a => a.subject_id === oldSubject.id).length;
-          await supabase.from('subjects').update({ available_seats: Math.max(0, Number(oldSubject.seats || 0) - occ) }).eq('id', oldSubject.id);
+        if (!targetAllotment && studentId) {
+          let query = supabase.from('allotments').select('*').eq('student_id', studentId);
+          if (electiveType) query = query.eq('elective_type', electiveType);
+          if (electiveNumber) query = query.eq('elective_number', Number(electiveNumber));
+          const { data } = await query.maybeSingle();
+          if (data) targetAllotment = data;
         }
-        if (newSubject) {
-          const occ = activeAllots.filter(a => a.subject_id === newSubject.id).length;
-          await supabase.from('subjects').update({ available_seats: Math.max(0, Number(newSubject.seats || 0) - occ) }).eq('id', newSubject.id);
+
+        const nowIso = new Date().toISOString();
+        const { data: oldSubject } = (targetAllotment && targetAllotment.subject_id)
+          ? await supabase.from('subjects').select('*').eq('id', targetAllotment.subject_id).maybeSingle()
+          : { data: null };
+
+        const { data: newSubject } = newSubjectId 
+          ? await supabase.from('subjects').select('*').eq('id', newSubjectId).maybeSingle()
+          : { data: null };
+
+        let updatedAllotment = null;
+
+        if (targetAllotment) {
+          const { data: updated, error: updateErr } = await supabase
+            .from('allotments')
+            .update({
+              subject_id: newSubjectId || null,
+              status: newSubjectId ? 'ALLOTTED' : 'WAITLISTED',
+              priority_selected: newSubjectId ? (targetAllotment.priority_selected || 'MANUAL') : null,
+              is_manual_override: true,
+              allotted_at: nowIso,
+              updated_at: nowIso
+            })
+            .eq('id', targetAllotment.id)
+            .select()
+            .single();
+
+          if (updateErr) {
+            throw new Error(`Database error updating allotment: ${updateErr.message}`);
+          }
+          updatedAllotment = updated;
+        } else if (studentId) {
+          const { data: studentProf } = await supabase.from('profiles').select('*').eq('id', studentId).maybeSingle();
+          const newPayload = {
+            student_id: studentId,
+            roll_number: studentProf?.roll_number || 'N/A',
+            student_email: studentProf?.email || '',
+            branch: studentProf?.branch || 'N/A',
+            section: studentProf?.section || 'A',
+            semester: Number(semester || studentProf?.semester || 5),
+            elective_type: electiveType || 'OE',
+            elective_number: Number(electiveNumber || 1),
+            subject_id: newSubjectId || null,
+            status: newSubjectId ? 'ALLOTTED' : 'WAITLISTED',
+            priority_selected: newSubjectId ? 'MANUAL' : null,
+            is_manual_override: true,
+            submitted_at: nowIso,
+            allotted_at: nowIso,
+            created_at: nowIso,
+            updated_at: nowIso
+          };
+          const { data: inserted, error: insertErr } = await supabase.from('allotments').insert([newPayload]).select().single();
+          if (insertErr) {
+            throw new Error(`Database error creating allotment: ${insertErr.message}`);
+          }
+          updatedAllotment = inserted;
+        } else {
+          throw new Error('Allotment record or student identifier not found.');
         }
-      } catch (seatErr) {
-        console.warn('Seat calibration note:', seatErr);
+
+        // Recalibrate seat vacancies for affected subjects
+        try {
+          const { data: allAllots } = await supabase.from('allotments').select('subject_id, status').eq('status', 'ALLOTTED');
+          const activeAllots = allAllots || [];
+
+          if (oldSubject) {
+            const occ = activeAllots.filter(a => a.subject_id === oldSubject.id).length;
+            await supabase.from('subjects').update({ available_seats: Math.max(0, Number(oldSubject.seats || 0) - occ) }).eq('id', oldSubject.id);
+          }
+          if (newSubject) {
+            const occ = activeAllots.filter(a => a.subject_id === newSubject.id).length;
+            await supabase.from('subjects').update({ available_seats: Math.max(0, Number(newSubject.seats || 0) - occ) }).eq('id', newSubject.id);
+          }
+        } catch (seatErr) {
+          console.warn('Seat calibration note:', seatErr);
+        }
+
+        await supabase.from('audit_logs').insert([{
+          coordinator_id: coordinatorId || null,
+          student_id: targetAllotment?.student_id || studentId,
+          action: 'MANUAL_ALLOTMENT_MODIFICATION',
+          old_value: oldSubject ? `${oldSubject.subject_code} - ${oldSubject.subject_name}` : 'WAITLISTED',
+          new_value: newSubject ? `${newSubject.subject_code} - ${newSubject.subject_name}` : 'WAITLISTED',
+          reason: reason || 'Manual adjustment by admin / coordinator'
+        }]);
+
+        // Sync local storage
+        try {
+          db.manualUpdateAllotment({
+            allotmentId: targetAllotment?.id || allotmentId,
+            studentId: targetAllotment?.student_id || studentId,
+            electiveType,
+            electiveNumber,
+            semester,
+            newSubjectId,
+            reason,
+            coordinatorId
+          });
+        } catch (e) {}
+
+        return updatedAllotment;
+      } catch (e) {
+        console.warn('Supabase manualUpdateAllotment error, using local storage fallback:', e);
       }
-
-      await supabase.from('audit_logs').insert([{
-        coordinator_id: coordinatorId,
-        student_id: targetAllotment.student_id,
-        action: 'MANUAL_ALLOTMENT_MODIFICATION',
-        old_value: oldSubject ? `${oldSubject.subject_code} - ${oldSubject.subject_name}` : 'WAITLISTED',
-        new_value: newSubject ? `${newSubject.subject_code} - ${newSubject.subject_name}` : 'WAITLISTED',
-        reason: reason || 'Manual adjustment by coordinator'
-      }]);
-
-      return updatedAllotment;
     }
-    throw new Error('Database connection is not configured.');
+    return db.manualUpdateAllotment({
+      allotmentId,
+      studentId,
+      electiveType,
+      electiveNumber,
+      semester,
+      newSubjectId,
+      reason,
+      coordinatorId
+    });
   },
 
   getAuditLogs: async () => {

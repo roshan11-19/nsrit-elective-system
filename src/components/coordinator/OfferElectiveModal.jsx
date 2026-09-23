@@ -12,7 +12,8 @@ import {
   Layers,
   Sparkles
 } from 'lucide-react';
-import { normalizeBatch } from '../../lib/storage';
+import { normalizeBatch, parseOfferedBranches, normalizeBranchName } from '../../lib/storage';
+import { coordinatorService } from '../../services/coordinatorService';
 
 export default function OfferElectiveModal({
   isOpen,
@@ -27,17 +28,37 @@ export default function OfferElectiveModal({
   onOpenCustomSubjectModal,
   onOpenEstablishDriveModal,
   initialBatch = '',
-  initialSemester = 5,
-  initialElectiveNumber = 1
+  initialSemester = '',
+  initialElectiveNumber = ''
 }) {
   const [selectedBatch, setSelectedBatch] = useState(initialBatch || '');
-  const [selectedSemester, setSelectedSemester] = useState(initialSemester || 5);
-  const [selectedElectiveNumber, setSelectedElectiveNumber] = useState(initialElectiveNumber || 1);
+  const [selectedSemester, setSelectedSemester] = useState(
+    (initialSemester !== undefined && initialSemester !== '' && !isNaN(Number(initialSemester))) ? Number(initialSemester) : ''
+  );
+  const [selectedElectiveNumber, setSelectedElectiveNumber] = useState(
+    (initialElectiveNumber !== undefined && initialElectiveNumber !== '' && !isNaN(Number(initialElectiveNumber))) ? Number(initialElectiveNumber) : ''
+  );
   const [selectedCurriculumIds, setSelectedCurriculumIds] = useState([]);
   const [curriculumSeatMap, setCurriculumSeatMap] = useState({});
   const [curriculumBranchesMap, setCurriculumBranchesMap] = useState({});
+  const [dbBranches, setDbBranches] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+
+  useEffect(() => {
+    async function loadBranches() {
+      if (!isOpen) return;
+      try {
+        const branches = await coordinatorService.getDepartments();
+        if (branches && branches.length > 0) {
+          setDbBranches(branches);
+        }
+      } catch (e) {
+        console.warn('Load branches error:', e);
+      }
+    }
+    loadBranches();
+  }, [isOpen]);
 
   // Available curriculum batches for this elective type
   const availableBatches = useMemo(() => {
@@ -66,7 +87,7 @@ export default function OfferElectiveModal({
         .filter(c => 
           c.elective_type === electiveType && 
           (!selectedBatch || normalizeBatch(c.batch) === normalizeBatch(selectedBatch)) &&
-          Number(c.semester) === Number(selectedSemester)
+          (!selectedSemester || Number(c.semester) === Number(selectedSemester))
         )
         .map(c => Number(c.elective_number || 1))
         .filter(Boolean)
@@ -83,35 +104,44 @@ export default function OfferElectiveModal({
 
     if (initialBatch && availableBatches.includes(initialBatch)) {
       setSelectedBatch(initialBatch);
-    } else if (availableBatches.length > 0) {
-      setSelectedBatch(availableBatches[0]);
+    } else if (initialBatch) {
+      setSelectedBatch(initialBatch);
     } else {
       setSelectedBatch('');
     }
-  }, [isOpen, initialBatch, availableBatches]);
+
+    if (initialSemester !== undefined && initialSemester !== '' && !isNaN(Number(initialSemester))) {
+      setSelectedSemester(Number(initialSemester));
+    } else {
+      setSelectedSemester('');
+    }
+
+    if (initialElectiveNumber !== undefined && initialElectiveNumber !== '' && !isNaN(Number(initialElectiveNumber))) {
+      setSelectedElectiveNumber(Number(initialElectiveNumber));
+    } else {
+      setSelectedElectiveNumber('');
+    }
+  }, [isOpen, initialBatch, initialSemester, initialElectiveNumber]);
 
   useEffect(() => {
-    if (availableSemesters.length > 0) {
+    if (selectedSemester !== '' && availableSemesters.length > 0) {
       if (!availableSemesters.includes(Number(selectedSemester))) {
-        setSelectedSemester(availableSemesters[0]);
+        setSelectedSemester('');
       }
-    } else {
-      setSelectedSemester(5);
     }
   }, [selectedBatch, availableSemesters]);
 
   useEffect(() => {
-    if (availableElectiveNumbers.length > 0) {
+    if (selectedElectiveNumber !== '' && availableElectiveNumbers.length > 0) {
       if (!availableElectiveNumbers.includes(Number(selectedElectiveNumber))) {
-        setSelectedElectiveNumber(availableElectiveNumbers[0]);
+        setSelectedElectiveNumber('');
       }
-    } else {
-      setSelectedElectiveNumber(1);
     }
   }, [selectedBatch, selectedSemester, availableElectiveNumbers]);
 
   // Filter matching curriculum subjects
   const availableCourses = useMemo(() => {
+    if (!selectedBatch || selectedSemester === '' || selectedElectiveNumber === '') return [];
     return curriculumList.filter(c => {
       if (selectedBatch && normalizeBatch(c.batch) !== normalizeBatch(selectedBatch)) return false;
       if (Number(c.semester) !== Number(selectedSemester)) return false;
@@ -125,18 +155,21 @@ export default function OfferElectiveModal({
   // PE -> Department PE Selection Drive configured by Coordinator in Tab 2
   // OE -> Institution OE Selection Drive configured by Central Admin
   const matchingDrive = useMemo(() => {
+    if (!selectedBatch || selectedSemester === '' || selectedElectiveNumber === '') return null;
     if (electiveType === 'PE') {
       return peDrives.find(d => 
         normalizeBatch(d.batch) === normalizeBatch(selectedBatch) && 
-        Number(d.semester) === Number(selectedSemester)
+        Number(d.semester) === Number(selectedSemester) &&
+        (!d.elective_number || Number(d.elective_number) === Number(selectedElectiveNumber))
       );
     } else {
       return adminWindows.find(w => 
         normalizeBatch(w.batch) === normalizeBatch(selectedBatch) && 
-        Number(w.semester) === Number(selectedSemester)
+        Number(w.semester) === Number(selectedSemester) &&
+        (!w.elective_number || Number(w.elective_number) === Number(selectedElectiveNumber))
       );
     }
-  }, [electiveType, peDrives, adminWindows, selectedBatch, selectedSemester]);
+  }, [electiveType, peDrives, adminWindows, selectedBatch, selectedSemester, selectedElectiveNumber]);
 
   const isDriveEstablished = !!matchingDrive;
   const isDriveActive = matchingDrive?.status === 'ACTIVE';
@@ -184,10 +217,13 @@ export default function OfferElectiveModal({
   };
 
   const otherBranches = useMemo(() => {
-    return registeredBranches.length > 0
-      ? registeredBranches.filter(b => b.toUpperCase() !== String(coordinatorBranch).toUpperCase())
-      : ['ECE', 'MECH', 'CIVIL', 'EEE', 'AIML', 'IT'];
-  }, [registeredBranches, coordinatorBranch]);
+    const merged = Array.from(new Set([
+      ...(registeredBranches || []),
+      ...(dbBranches || [])
+    ]));
+    const cleanCurrent = normalizeBranchName(coordinatorBranch);
+    return merged.filter(b => normalizeBranchName(b) !== cleanCurrent);
+  }, [registeredBranches, dbBranches, coordinatorBranch]);
 
   // Submit and offer selected subjects
   const handleSubmit = async () => {
@@ -196,18 +232,28 @@ export default function OfferElectiveModal({
       setError('Please select an Academic Batch.');
       return;
     }
+    if (selectedSemester === '') {
+      setError('Please select a Semester.');
+      return;
+    }
+    if (selectedElectiveNumber === '') {
+      setError(`Please select ${electiveType === 'PE' ? 'a Professional Elective (PE)' : 'an Open Elective (OE)'} number.`);
+      return;
+    }
 
-    if (!isDriveEstablished) {
-      if (electiveType === 'PE') {
-        setError(`Cannot offer PE subjects. Please establish a PE Selection Drive for Batch ${selectedBatch} (Semester ${selectedSemester}) in Tab 2 first.`);
-      } else {
-        setError(`Cannot offer OE subjects. Central Administrator must first configure an Open Elective Selection Drive for Batch ${selectedBatch} (Semester ${selectedSemester}) in the Admin Portal.`);
-      }
+    if (!matchingDrive) {
+      setError(isPE
+        ? `Cannot add PE offerings: The PE Selection Drive for Batch ${selectedBatch} • Semester ${selectedSemester} • PE-${selectedElectiveNumber} has not been established yet. Please establish the PE Selection Drive in Setup Mode (LOCKED) in Tab 2 first.`
+        : `Cannot add Open Elective offerings: The OE Selection Drive for Batch ${selectedBatch} • Semester ${selectedSemester} • OE-${selectedElectiveNumber} has not been created by the College Administrator yet. The Administrator must create the OE Selection Drive in Setup Mode (LOCKED) first.`
+      );
       return;
     }
 
     if (isDriveActive) {
-      setError(`Cannot offer or modify subjects while ${electiveType === 'PE' ? 'PE' : 'Institution OE'} Selection Drive is ACTIVE for Batch ${selectedBatch} (Semester ${selectedSemester}). Please pause the drive first.`);
+      setError(isPE
+        ? `Cannot modify PE offerings while the PE Selection Drive is ACTIVE for Batch ${selectedBatch} (Semester ${selectedSemester}). Please pause the drive in Tab 2 first.`
+        : `Cannot modify Open Elective offerings while the OE Selection Drive is ACTIVE for Batch ${selectedBatch} (Semester ${selectedSemester}). The College Administrator must pause the drive first.`
+      );
       return;
     }
 
@@ -226,8 +272,8 @@ export default function OfferElectiveModal({
           : 60;
         
         const targetBranches = electiveType === 'PE'
-          ? [coordinatorBranch]
-          : (curriculumBranchesMap[currId] || (curr?.offered_branches || ['ALL']));
+          ? (curriculumBranchesMap[currId] || [coordinatorBranch])
+          : parseOfferedBranches(curriculumBranchesMap[currId] || curr?.offered_branches, ['ALL']);
 
         return {
           subject_code: curr.subject_code,
@@ -301,17 +347,18 @@ export default function OfferElectiveModal({
             <select
               value={selectedSemester}
               onChange={(e) => {
-                setSelectedSemester(Number(e.target.value));
+                setSelectedSemester(e.target.value === '' ? '' : Number(e.target.value));
                 setSelectedCurriculumIds([]);
               }}
               className="w-full px-3 py-2 rounded-xl border border-gray-300 bg-white text-gray-900 text-xs font-bold focus:ring-2 focus:ring-crimson-600"
             >
+              <option value="">-- Select Semester --</option>
               {availableSemesters.length > 0 ? (
                 availableSemesters.map(s => (
                   <option key={s} value={s}>Semester {s}</option>
                 ))
               ) : (
-                [5, 6, 7, 8, 1, 2, 3, 4].map(s => (
+                [1, 2, 3, 4, 5, 6, 7, 8].map(s => (
                   <option key={s} value={s}>Semester {s}</option>
                 ))
               )}
@@ -325,7 +372,7 @@ export default function OfferElectiveModal({
             <select
               value={selectedElectiveNumber}
               onChange={(e) => {
-                setSelectedElectiveNumber(Number(e.target.value));
+                setSelectedElectiveNumber(e.target.value === '' ? '' : Number(e.target.value));
                 setSelectedCurriculumIds([]);
               }}
               className={`w-full px-3 py-2 rounded-xl border text-xs font-bold focus:ring-2 ${
@@ -334,6 +381,7 @@ export default function OfferElectiveModal({
                   : 'border-purple-300 bg-purple-50 text-purple-900 focus:ring-purple-600'
               }`}
             >
+              <option value="">{isPE ? '-- Select PE Slot --' : '-- Select OE Slot --'}</option>
               {availableElectiveNumbers.length > 0 ? (
                 availableElectiveNumbers.map(n => (
                   <option key={n} value={n}>
@@ -351,50 +399,41 @@ export default function OfferElectiveModal({
           </div>
         </div>
 
-        {/* 2. Drive / Batch Control Status Banner (Applies to both PE and OE) */}
+        {/* 2. Drive / Batch Control Status Banner (3-State Matrix: Not Added | Active | Setup Mode) */}
         <div>
-          {!isDriveEstablished ? (
-            <div className="p-3.5 bg-gradient-to-r from-amber-50 to-orange-50 border border-amber-200 rounded-2xl flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-2xs">
-              <div className="flex items-start sm:items-center gap-3">
-                <div className="p-2 rounded-xl bg-amber-100 text-amber-800 shrink-0">
-                  <AlertCircle className="w-5 h-5 text-amber-700" />
-                </div>
-                <div>
-                  <h4 className="text-xs font-bold text-amber-900">
-                    {isPE ? 'PE Selection Drive Not Established' : 'Admin OE Batch Control Not Established'}
-                  </h4>
-                  <p className="text-[11px] text-amber-800 leading-relaxed">
-                    {isPE ? (
-                      <>
-                        You must establish a PE Drive for <strong>Batch {selectedBatch || '(Select Batch)'} (Sem {selectedSemester})</strong> in Tab 2 before activating offerings.
-                      </>
-                    ) : (
-                      <>
-                        Central Administrator must first configure an <strong>Open Elective (OE) Selection Drive</strong> for <strong>Batch {selectedBatch || '(Select Batch)'} (Sem {selectedSemester})</strong> in the Admin Portal before department coordinators can offer Open Electives.
-                      </>
-                    )}
-                  </p>
-                </div>
+          {!selectedBatch || selectedSemester === '' || selectedElectiveNumber === '' ? (
+            <div className="p-3.5 bg-blue-50/70 border border-blue-200 rounded-2xl flex items-center gap-2.5 text-blue-900 shadow-2xs">
+              <Info className="w-4 h-4 text-blue-700 shrink-0" />
+              <span className="text-xs font-semibold">
+                Please select the <strong>Target Academic Batch</strong>, <strong>Semester</strong>, and <strong>Elective Slot</strong> above to load curriculum courses.
+              </span>
+            </div>
+          ) : !matchingDrive ? (
+            /* STATE 1: Drive is NOT ADDED */
+            <div className="p-3.5 bg-amber-50 border-2 border-amber-300 rounded-2xl flex items-start gap-3 shadow-2xs">
+              <div className="p-2 rounded-xl bg-amber-200 text-amber-900 shrink-0">
+                <AlertCircle className="w-5 h-5 text-amber-800" />
               </div>
-              {isPE && onOpenEstablishDriveModal && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    onClose();
-                    onOpenEstablishDriveModal({ 
-                      batch: selectedBatch, 
-                      semester: selectedSemester, 
-                      elective_number: selectedElectiveNumber 
-                    });
-                  }}
-                  className="px-3.5 py-1.5 bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold rounded-xl shadow-xs shrink-0 flex items-center gap-1.5 transition-colors cursor-pointer"
-                >
-                  <Plus className="w-4 h-4" />
-                  <span>Establish PE Drive Now</span>
-                </button>
-              )}
+              <div>
+                <div className="flex items-center gap-2">
+                  <h4 className="text-xs font-black text-amber-900 uppercase tracking-wide">
+                    {isPE ? 'PE Selection Drive Not Added' : 'Admin OE Selection Drive Not Added'}
+                  </h4>
+                  <span className="px-2 py-0.5 rounded-full bg-amber-200 text-amber-900 font-mono text-[10px] font-bold">
+                    DRIVE NOT ADDED
+                  </span>
+                </div>
+                <p className="text-[11px] text-amber-800 mt-1">
+                  {isPE ? (
+                    <>You cannot add offerings or edit subjects/seats for <strong>Batch {selectedBatch} • Semester {selectedSemester} • PE-{selectedElectiveNumber}</strong> until the PE Selection Drive is established in Setup Mode (LOCKED) in Tab 2.</>
+                  ) : (
+                    <>You cannot add offerings or edit subjects/seats for <strong>Batch {selectedBatch} • Semester {selectedSemester} • OE-{selectedElectiveNumber}</strong> until the College Administrator creates the institutional OE Selection Drive in Setup Mode (LOCKED) in Admin Portal.</>
+                  )}
+                </p>
+              </div>
             </div>
           ) : isDriveActive ? (
+            /* STATE 2: Drive is ADDED but Selection is ACTIVE */
             <div className="p-3.5 bg-gradient-to-r from-amber-50 via-yellow-50 to-amber-50 border border-amber-300 rounded-2xl flex items-start sm:items-center gap-3 shadow-2xs">
               <div className="p-2 rounded-xl bg-amber-200 text-amber-900 shrink-0 animate-pulse">
                 <Lock className="w-5 h-5 text-amber-800" />
@@ -402,36 +441,33 @@ export default function OfferElectiveModal({
               <div>
                 <div className="flex items-center gap-2">
                   <h4 className="text-xs font-black text-amber-900 uppercase tracking-wide">
-                    Student Selection Active • Offerings Frozen
+                    {isPE ? 'PE Selection Active • Offerings Frozen' : 'OE Selection Active • Offerings Frozen'}
                   </h4>
                   <span className="px-2 py-0.5 rounded-full bg-emerald-600 text-white font-mono text-[10px] font-bold">
-                    LIVE
+                    ACTIVE FOR SELECTION
                   </span>
                 </div>
                 <p className="text-[11px] text-amber-800 mt-0.5">
                   {isPE ? (
-                    <>
-                      PE Selection Drive for <strong>Batch {selectedBatch} (Sem {selectedSemester})</strong> is actively running. Offerings cannot be modified while live. Pause the drive in Tab 2 to make changes.
-                    </>
+                    <>Drive is currently active for student selection. You cannot add offerings or edit subjects/seats. Pause the drive in Tab 2 first.</>
                   ) : (
-                    <>
-                      Institution OE Selection Drive for <strong>Batch {selectedBatch} (Sem {selectedSemester})</strong> is actively running. Offerings cannot be modified while live. Contact Central Administrator to pause the drive to make changes.
-                    </>
+                    <>Drive is currently active for student selection. You cannot add offerings or edit subjects/seats. Contact College Admin to pause the drive first.</>
                   )}
                 </p>
               </div>
             </div>
           ) : (
-            <div className="p-3 bg-blue-50/80 border border-blue-200 rounded-2xl flex items-center gap-2.5 shadow-2xs">
-              <CheckCircle2 className="w-4 h-4 text-blue-700 shrink-0" />
+            /* STATE 3: Drive is ADDED and in SETUP MODE */
+            <div className="p-3 bg-emerald-50/80 border border-emerald-200 rounded-2xl flex items-center gap-2.5 shadow-2xs">
+              <CheckCircle2 className="w-4 h-4 text-emerald-700 shrink-0" />
               <div>
-                <span className="text-xs font-bold text-blue-900">
-                  {isPE ? 'PE Drive Configured & Ready (Selection Paused)' : 'Admin OE Batch Control Active & Ready'}
+                <span className="text-xs font-bold text-emerald-900">
+                  {isPE ? 'PE Drive in Setup Mode • Ready for Offerings' : 'Admin OE Drive in Setup Mode • Ready for Offerings'}
                 </span>
-                <p className="text-[11px] text-blue-700">
+                <p className="text-[11px] text-emerald-700">
                   {isPE 
-                    ? `Drive for Batch ${selectedBatch} (Sem ${selectedSemester}) is configured. Offerings can be freely added or edited.` 
-                    : `Admin OE Drive for Batch ${selectedBatch} (Sem ${selectedSemester}) is established. Coordinators can freely offer subjects.`}
+                    ? `The PE Selection Drive is in Setup Mode (LOCKED). You can select curriculum courses, configure seat capacities, and activate offerings.` 
+                    : `The institutional OE drive is in Setup Mode (LOCKED). You can select curriculum courses, configure seat capacities and branch eligibility, and activate offerings.`}
                 </p>
               </div>
             </div>
@@ -443,7 +479,7 @@ export default function OfferElectiveModal({
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
               <span className="text-xs font-bold text-gray-900 font-display">
-                Curriculum Courses for {isPE ? `PE-${selectedElectiveNumber}` : `OE-${selectedElectiveNumber}`} ({selectedBatch ? `Batch ${selectedBatch}, ` : ''}Sem {selectedSemester}):
+                Curriculum Courses for {isPE ? `PE-${selectedElectiveNumber || '...'}` : `OE-${selectedElectiveNumber || '...'}`} ({selectedBatch ? `Batch ${selectedBatch}, ` : ''}Sem {selectedSemester || '...'}):
               </span>
               <span className="text-xs text-gray-500">
                 ({availableCourses.length} available)
@@ -453,7 +489,7 @@ export default function OfferElectiveModal({
             {availableCourses.length > 0 && (
               <button
                 type="button"
-                disabled={!isDriveEstablished || isDriveActive}
+                disabled={isDriveActive || !matchingDrive}
                 onClick={handleSelectAll}
                 className="text-xs font-bold text-blue-700 hover:text-blue-900 hover:underline disabled:opacity-40 disabled:cursor-not-allowed"
               >
@@ -462,12 +498,19 @@ export default function OfferElectiveModal({
             )}
           </div>
 
-          {availableCourses.length > 0 ? (
+          {!selectedBatch || selectedSemester === '' || selectedElectiveNumber === '' ? (
+            <div className="p-8 bg-gray-50 rounded-2xl border border-dashed border-gray-300 text-center space-y-2">
+              <BookOpen className="w-8 h-8 text-gray-400 mx-auto" />
+              <p className="text-xs text-gray-700 font-bold">
+                Select an Academic Batch, Semester, and Elective Slot to view available curriculum courses.
+              </p>
+            </div>
+          ) : availableCourses.length > 0 ? (
             <div className="bg-white rounded-2xl border border-gray-200 divide-y divide-gray-100 max-h-80 overflow-y-auto">
               {availableCourses.map(curr => {
                 const isSelected = selectedCurriculumIds.includes(curr.id);
                 const seatCount = curriculumSeatMap[curr.id] !== undefined ? curriculumSeatMap[curr.id] : 60;
-                const isDisabled = !isDriveEstablished || isDriveActive;
+                const isDisabled = isDriveActive || !matchingDrive;
 
                 const defaultBranches = Array.isArray(curr.offered_branches) ? curr.offered_branches : ['ALL'];
                 const selectedBranches = curriculumBranchesMap[curr.id] || defaultBranches;
@@ -547,12 +590,13 @@ export default function OfferElectiveModal({
                         <div className="flex flex-wrap items-center gap-2">
                           <button
                             type="button"
+                            disabled={isDisabled}
                             onClick={() => handleBranchToggle(curr.id, 'ALL')}
                             className={`px-3 py-1 rounded-xl text-xs font-extrabold font-mono transition-all flex items-center gap-1.5 shadow-2xs ${
                               selectedBranches.includes('ALL')
                                 ? 'bg-purple-700 text-white shadow-sm ring-2 ring-purple-400'
                                 : 'bg-white text-gray-700 border border-gray-300 hover:border-purple-400 hover:bg-purple-50'
-                            }`}
+                            } disabled:opacity-40 disabled:cursor-not-allowed`}
                           >
                             {selectedBranches.includes('ALL') && <Check className="w-3.5 h-3.5 text-white" />}
                             <span>ALL BRANCHES</span>
@@ -564,12 +608,13 @@ export default function OfferElectiveModal({
                               <button
                                 key={b}
                                 type="button"
+                                disabled={isDisabled}
                                 onClick={() => handleBranchToggle(curr.id, b)}
                                 className={`px-3 py-1 rounded-xl text-xs font-extrabold font-mono transition-all flex items-center gap-1.5 shadow-2xs ${
                                   isSelected
                                     ? 'bg-purple-100 text-purple-900 border-2 border-purple-600 shadow-xs'
                                     : 'bg-white text-gray-600 border border-gray-300 hover:border-purple-300 hover:bg-purple-50/50'
-                                }`}
+                                } disabled:opacity-40 disabled:cursor-not-allowed`}
                               >
                                 {isSelected && <Check className="w-3.5 h-3.5 text-purple-700" />}
                                 <span>{b}</span>
@@ -606,8 +651,8 @@ export default function OfferElectiveModal({
                 onOpenCustomSubjectModal({
                   type: electiveType,
                   batch: selectedBatch,
-                  semester: Number(selectedSemester),
-                  elective_number: Number(selectedElectiveNumber),
+                  semester: selectedSemester !== '' ? Number(selectedSemester) : 5,
+                  elective_number: selectedElectiveNumber !== '' ? Number(selectedElectiveNumber) : 1,
                   regulation: 'AR23'
                 });
               }
@@ -629,9 +674,12 @@ export default function OfferElectiveModal({
             <button
               type="button"
               disabled={
+                !selectedBatch ||
+                selectedSemester === '' ||
+                selectedElectiveNumber === '' ||
                 selectedCurriculumIds.length === 0 || 
                 loading || 
-                !isDriveEstablished || 
+                !matchingDrive ||
                 isDriveActive
               }
               onClick={handleSubmit}

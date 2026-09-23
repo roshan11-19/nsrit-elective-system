@@ -17,7 +17,8 @@ import {
   GraduationCap,
   LogOut,
   Eye,
-  EyeOff
+  EyeOff,
+  Clock
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { studentService } from '../../services/studentService';
@@ -233,12 +234,23 @@ export default function StudentProfilePage() {
                   <span>Professional Elective (PE)</span>
                 </span>
                 <span className={`px-2 py-0.5 rounded text-[10px] font-extrabold ${
-                  peAllotment?.status === 'ALLOTTED' ? 'bg-emerald-100 text-emerald-800' : 'bg-gray-100 text-gray-600'
+                  peAllotment?.allotment_revealed === false
+                    ? 'bg-amber-100 text-amber-800'
+                    : peAllotment?.status === 'ALLOTTED'
+                      ? 'bg-emerald-100 text-emerald-800'
+                      : 'bg-gray-100 text-gray-600'
                 }`}>
-                  {peAllotment?.status || 'Pending Selection'}
+                  {peAllotment?.allotment_revealed === false 
+                    ? 'Publication Pending' 
+                    : peAllotment?.status || 'Pending Selection'}
                 </span>
               </div>
-              {peAllotment?.subject ? (
+              {peAllotment?.allotment_revealed === false ? (
+                <div className="text-[11px] text-amber-700 font-medium pl-5 flex items-center gap-1">
+                  <Clock className="w-3 h-3 text-amber-600" />
+                  <span>Priorities submitted • Allotment pending coordinator publication</span>
+                </div>
+              ) : peAllotment?.subject ? (
                 <div className="text-xs font-semibold text-gray-800 pl-5">
                   {peAllotment.subject.subject_code} — {peAllotment.subject.subject_name}
                 </div>
@@ -255,12 +267,23 @@ export default function StudentProfilePage() {
                   <span>Open Elective (OE)</span>
                 </span>
                 <span className={`px-2 py-0.5 rounded text-[10px] font-extrabold ${
-                  oeAllotment?.status === 'ALLOTTED' ? 'bg-emerald-100 text-emerald-800' : 'bg-gray-100 text-gray-600'
+                  oeAllotment?.allotment_revealed === false
+                    ? 'bg-amber-100 text-amber-800'
+                    : oeAllotment?.status === 'ALLOTTED'
+                      ? 'bg-emerald-100 text-emerald-800'
+                      : 'bg-gray-100 text-gray-600'
                 }`}>
-                  {oeAllotment?.status || 'Pending Selection'}
+                  {oeAllotment?.allotment_revealed === false 
+                    ? 'Publication Pending' 
+                    : oeAllotment?.status || 'Pending Selection'}
                 </span>
               </div>
-              {oeAllotment?.subject ? (
+              {oeAllotment?.allotment_revealed === false ? (
+                <div className="text-[11px] text-amber-700 font-medium pl-5 flex items-center gap-1">
+                  <Clock className="w-3 h-3 text-amber-600" />
+                  <span>Priorities submitted • Allotment pending administrator publication</span>
+                </div>
+              ) : oeAllotment?.subject ? (
                 <div className="text-xs font-semibold text-gray-800 pl-5">
                   {oeAllotment.subject.subject_code} — {oeAllotment.subject.subject_name}
                 </div>

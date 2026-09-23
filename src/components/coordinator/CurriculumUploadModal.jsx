@@ -22,7 +22,7 @@ export default function CurriculumUploadModal({
   initialBatch = ''
 }) {
   const [targetBatch, setTargetBatch] = useState(initialBatch || '');
-  const [targetRegulation, setTargetRegulation] = useState('AR23');
+  const [targetRegulation, setTargetRegulation] = useState('');
   const [parsedRows, setParsedRows] = useState([]);
   const [fileName, setFileName] = useState('');
   const [parsing, setParsing] = useState(false);
@@ -47,6 +47,11 @@ export default function CurriculumUploadModal({
       return;
     }
 
+    if (!targetRegulation.trim()) {
+      setError('Please enter the Regulation (e.g. AR23, AR20) before uploading the sheet.');
+      return;
+    }
+
     setFileName(file.name);
     setParsing(true);
 
@@ -67,7 +72,7 @@ export default function CurriculumUploadModal({
 
         // Map and validate columns
         const cleanBatch = normalizeBatch(targetBatch);
-        const defaultReg = targetRegulation.trim().toUpperCase() || 'AR23';
+        const defaultReg = targetRegulation.trim().toUpperCase();
         const mapped = json.map((r, idx) => {
           const code = String(r['Subject Code'] || r['subject_code'] || r['Course Code'] || r['Code'] || '').trim().toUpperCase().replace(/\s+/g, '');
           const name = String(r['Subject Name'] || r['subject_name'] || r['Course Name'] || r['Name'] || '').trim();
@@ -79,12 +84,12 @@ export default function CurriculumUploadModal({
 
           const rawNum = r['Elective Number'] || r['elective_number'] || r['Elective No'] || r['Number'] || 1;
           const num = Math.max(1, Math.min(8, Number(rawNum) || 1));
-          const reg = String(r['Regulation'] || r['regulation'] || defaultReg || 'AR23').trim().toUpperCase();
+          const reg = String(r['Regulation'] || r['regulation'] || defaultReg || '').trim().toUpperCase();
           return {
             rowId: idx + 1,
             batch: cleanBatch,
             branch: coordinatorBranch,
-            regulation: reg,
+            regulation: reg || defaultReg,
             semester: sem >= 1 && sem <= 8 ? sem : 5,
             elective_type: eType,
             elective_number: num,
@@ -103,14 +108,15 @@ export default function CurriculumUploadModal({
         const seen = new Set();
         const duplicates = [];
         mapped.forEach(r => {
-          if (seen.has(r.subject_code)) {
-            duplicates.push(r.subject_code);
+          const key = `${r.semester}-${r.elective_type}-${r.elective_number}-${r.subject_code}`;
+          if (seen.has(key)) {
+            duplicates.push(`${r.subject_code} in Sem ${r.semester} ${r.elective_type}-${r.elective_number}`);
           }
-          seen.add(r.subject_code);
+          seen.add(key);
         });
 
         if (duplicates.length > 0) {
-          setError(`Duplicate subject codes detected in uploaded file: ${Array.from(new Set(duplicates)).join(', ')}. Each subject code in a batch must be unique.`);
+          setError(`Duplicate courses detected in sheet: ${duplicates.join(', ')}`);
           setParsing(false);
           return;
         }
@@ -162,6 +168,11 @@ export default function CurriculumUploadModal({
   const handleSubmit = async () => {
     if (!targetBatch.trim()) {
       setError('Please enter the Target Academic Batch.');
+      return;
+    }
+
+    if (!targetRegulation.trim()) {
+      setError('Please enter the Regulation (e.g. AR23).');
       return;
     }
 

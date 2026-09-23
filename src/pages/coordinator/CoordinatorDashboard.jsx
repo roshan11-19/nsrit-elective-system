@@ -31,6 +31,8 @@ import {
   Play,
   Pause,
   ArrowLeft,
+  ArrowRight,
+  ChevronLeft,
   ChevronRight,
   ChevronDown,
   ChevronUp,
@@ -45,7 +47,12 @@ import {
   Award,
   TrendingUp,
   Send,
-  FileText
+  FileText,
+  EyeOff,
+  Wand2,
+  KeyRound,
+  RotateCw,
+  Clock
 } from 'lucide-react';
 import { 
   BarChart, 
@@ -61,11 +68,13 @@ import {
   Legend 
 } from 'recharts';
 import { useAuth } from '../../context/AuthContext';
-import { normalizeBatch } from '../../lib/storage';
+import { normalizeBatch, parseOfferedBranches } from '../../lib/storage';
 import { coordinatorService } from '../../services/coordinatorService';
 import { adminService } from '../../services/adminService';
+import { notificationService } from '../../services/notificationService';
 
 // Modals
+import Modal from '../../components/common/Modal';
 import CurriculumUploadModal from '../../components/coordinator/CurriculumUploadModal';
 import CurriculumSubjectModal from '../../components/coordinator/CurriculumSubjectModal';
 import PESelectionDriveModal from '../../components/coordinator/PESelectionDriveModal';
@@ -81,7 +90,7 @@ import PrintAllotmentView from '../../components/coordinator/PrintAllotmentView'
 const COLORS = ['#C8191E', '#2563EB', '#059669', '#D97706', '#7C3AED', '#DB2777', '#0891B2', '#4B5563'];
 
 export default function CoordinatorDashboard() {
-  const { currentUser, showToast } = useAuth();
+  const { currentUser, showToast, verifyCurrentPassword } = useAuth();
   const coordinatorBranch = currentUser?.branch || 'CSE';
   
   // 5 Main Navigation Tabs:
@@ -123,12 +132,39 @@ export default function CoordinatorDashboard() {
   const [editingCurriculumSubject, setEditingCurriculumSubject] = useState(null);
 
   const [peDriveModalOpen, setPeDriveModalOpen] = useState(false);
-  const [peDriveModalDefaults, setPeDriveModalDefaults] = useState({ batch: '', semester: 5 });
+  const [peDriveModalDefaults, setPeDriveModalDefaults] = useState({ batch: '', semester: '', elective_number: '' });
   const [resumeOfferingAfterDrive, setResumeOfferingAfterDrive] = useState(null);
+
+  // 100-Row Pagination State for Allotments Master List
+  const [allotmentPage, setAllotmentPage] = useState(1);
+  const ALLOTMENT_PAGE_SIZE = 100;
+
+  // Reveal Allotments Modal State
+  const [revealModalOpen, setRevealModalOpen] = useState(false);
+  const [selectedDriveForReveal, setSelectedDriveForReveal] = useState(null);
+  const [revealPassword, setRevealPassword] = useState('');
+  const [revealLoading, setRevealLoading] = useState(false);
+  const [revealError, setRevealError] = useState('');
+
+  // Due Date Modal State
+  const [dueDateModalOpen, setDueDateModalOpen] = useState(false);
+  const [selectedDriveForDueDate, setSelectedDriveForDueDate] = useState(null);
+  const [newDriveDueDate, setNewDriveDueDate] = useState('');
+  const [dueDateLoading, setDueDateLoading] = useState(false);
+  const [dueDateError, setDueDateError] = useState('');
+
+  // Auto Allocate / Reallocate Modal State
+  const [autoAllocateModalOpen, setAutoAllocateModalOpen] = useState(false);
+  const [selectedDriveForAutoAllocate, setSelectedDriveForAutoAllocate] = useState(null);
+  const [autoAllocatePassword, setAutoAllocatePassword] = useState('');
+  const [autoAllocateLoading, setAutoAllocateLoading] = useState(false);
+  const [autoAllocateError, setAutoAllocateError] = useState('');
+  const [autoAllocateProgress, setAutoAllocateProgress] = useState(0);
+  const [autoAllocatePhase, setAutoAllocatePhase] = useState('');
 
   const [offerElectiveModalOpen, setOfferElectiveModalOpen] = useState(false);
   const [offerElectiveType, setOfferElectiveType] = useState('PE');
-  const [offerElectiveDefaults, setOfferElectiveDefaults] = useState({ batch: '', semester: 5, elective_number: 1 });
+  const [offerElectiveDefaults, setOfferElectiveDefaults] = useState({ batch: '', semester: '', elective_number: '' });
 
   // Tab 1: Batch Cards Accordion & In-Card Filters State (Collapsed by default)
   const [expandedCurriculumBatchKeys, setExpandedCurriculumBatchKeys] = useState({});
@@ -175,6 +211,24 @@ export default function CoordinatorDashboard() {
 
   const [overrideModalOpen, setOverrideModalOpen] = useState(false);
   const [selectedAllotmentForOverride, setSelectedAllotmentForOverride] = useState(null);
+
+  // -------------------------------------------------------------
+  // TAB 2: PE SELECTION DRIVES STATE & FILTERS
+  // -------------------------------------------------------------
+  const [selectedPEDriveId, setSelectedPEDriveId] = useState(null);
+  const [expandedPEDriveKeys, setExpandedPEDriveKeys] = useState({});
+  const togglePEDriveKey = (driveId) => {
+    setExpandedPEDriveKeys(prev => ({
+      ...prev,
+      [driveId]: prev[driveId] !== undefined ? !prev[driveId] : false
+    }));
+  };
+  const [peDriveFilters, setPeDriveFilters] = useState({
+    batch: 'ALL',
+    semester: 'ALL',
+    status: 'ALL',
+    search: ''
+  });
 
   // -------------------------------------------------------------
   // TAB 3: PROFESSIONAL ELECTIVES (PE) OFFERING PIPELINE STATE
@@ -294,7 +348,8 @@ export default function CoordinatorDashboard() {
         logsList,
         coordsList,
         winList,
-        batchSummaries
+        batchSummaries,
+        deptList
       ] = await Promise.all([
         coordinatorService.getCurriculum('ALL', coordBranch),
         coordinatorService.getPESelectionWindows(coordBranch),
@@ -304,7 +359,8 @@ export default function CoordinatorDashboard() {
         coordinatorService.getAuditLogs(),
         adminService.getCoordinators(),
         adminService.getSelectionWindows(),
-        coordinatorService.getCurriculumBatchSummaries(coordBranch)
+        coordinatorService.getCurriculumBatchSummaries(coordBranch),
+        coordinatorService.getDepartments()
       ]);
 
       setCurriculumList(curricula || []);
@@ -313,7 +369,10 @@ export default function CoordinatorDashboard() {
       setOeSubjects(oeList || []);
       setStudents(studentList || []);
       setAuditLogs(logsList || []);
-      const regBranches = Array.from(new Set((coordsList || []).map(c => c.branch).filter(Boolean))).sort();
+      const regBranches = Array.from(new Set([
+        ...(deptList || []),
+        ...(coordsList || []).map(c => c.branch).filter(Boolean)
+      ])).sort();
       setRegisteredBranches(regBranches);
       setAdminWindows(winList || []);
       setCurriculumSummaries(batchSummaries || []);
@@ -344,30 +403,58 @@ export default function CoordinatorDashboard() {
         ...filters,
         coordinatorBranch: coordBranch
       });
-      setAllotments(records);
+      const sortedRecords = [...records].sort((a, b) => {
+        const rollA = a.rollNumber || a.roll_number || '';
+        const rollB = b.rollNumber || b.roll_number || '';
+        return rollA.localeCompare(rollB, undefined, { numeric: true, sensitivity: 'base' });
+      });
+      setAllotments(sortedRecords);
+      setAllotmentPage(1);
     }
     filterAllotments();
   }, [filters, currentUser?.branch]);
 
-  // Derived Batches Pool (from curriculum, drives, profiles, and subjects)
+  // Derived 100-Row Pagination for Allotments
+  const totalAllotmentPages = Math.max(1, Math.ceil((allotments.length || 0) / ALLOTMENT_PAGE_SIZE));
+  const currentAllotmentPage = Math.min(Math.max(1, allotmentPage), totalAllotmentPages);
+  const paginatedAllotments = useMemo(() => {
+    const start = (currentAllotmentPage - 1) * ALLOTMENT_PAGE_SIZE;
+    return (allotments || []).slice(start, start + ALLOTMENT_PAGE_SIZE);
+  }, [allotments, currentAllotmentPage]);
+
+  // Batches pool in Descending order (strictly from active data without hardcoded dummy batches)
   const availableBatches = Array.from(new Set([
     ...curriculumList.map(c => normalizeBatch(c.batch)),
     ...peDrives.map(d => normalizeBatch(d.batch)),
-    ...students.map(s => normalizeBatch(s.admitted_batch)),
-    ...peSubjects.map(s => normalizeBatch(s.admitted_batch)),
-    ...oeSubjects.map(s => normalizeBatch(s.admitted_batch)),
+    ...students.map(s => normalizeBatch(s.admitted_batch || s.batch)),
+    ...peSubjects.map(s => normalizeBatch(s.admitted_batch || s.batch)),
+    ...oeSubjects.map(s => normalizeBatch(s.admitted_batch || s.batch)),
     ...allotments.map(a => normalizeBatch(a.admitted_batch || a.batch)),
     ...(adminWindows || []).map(w => normalizeBatch(w.batch))
-  ].filter(Boolean))).sort();
+  ].filter(Boolean))).sort((a, b) => b.localeCompare(a, undefined, { numeric: true, sensitivity: 'base' }));
 
-  // Sorted PE Selection Drives (ordered by Batch ascending, then Semester ascending)
+  // Student Batches pool (strictly from enrolled students only)
+  const studentBatches = useMemo(() => {
+    return Array.from(new Set(
+      students
+        .map(s => normalizeBatch(s.admitted_batch || s.batch || ''))
+        .filter(Boolean)
+    )).sort((a, b) => b.localeCompare(a, undefined, { numeric: true, sensitivity: 'base' }));
+  }, [students]);
+
+  // Sorted PE Selection Drives (ordered by Batch descending, then PE number descending, then Semester descending)
   const sortedPeDrives = useMemo(() => {
     return [...peDrives].sort((a, b) => {
       const batchA = normalizeBatch(a.batch || '');
       const batchB = normalizeBatch(b.batch || '');
-      const batchCompare = batchA.localeCompare(batchB, undefined, { numeric: true, sensitivity: 'base' });
+      const batchCompare = batchB.localeCompare(batchA, undefined, { numeric: true, sensitivity: 'base' });
       if (batchCompare !== 0) return batchCompare;
-      return (Number(a.semester) || 0) - (Number(b.semester) || 0);
+      
+      const numA = Number(a.elective_number || 1);
+      const numB = Number(b.elective_number || 1);
+      if (numA !== numB) return numB - numA;
+
+      return (Number(b.semester) || 0) - (Number(a.semester) || 0);
     });
   }, [peDrives]);
 
@@ -531,6 +618,16 @@ export default function CoordinatorDashboard() {
         g.subjects.some(s => s.subject_code?.toLowerCase().includes(query) || s.subject_name?.toLowerCase().includes(query))
       );
     }
+    list.sort((a, b) => {
+      const batchA = normalizeBatch(a.batch || '');
+      const batchB = normalizeBatch(b.batch || '');
+      const batchComp = batchB.localeCompare(batchA, undefined, { numeric: true, sensitivity: 'base' });
+      if (batchComp !== 0) return batchComp;
+      return (Number(b.elective_number) || 1) - (Number(a.elective_number) || 1);
+    });
+    list.forEach(g => {
+      g.subjects.sort((a, b) => String(a.subject_code || '').localeCompare(String(b.subject_code || ''), undefined, { numeric: true, sensitivity: 'base' }));
+    });
     return list;
   }, [peSubjects, peSubjectFilters]);
 
@@ -571,19 +668,119 @@ export default function CoordinatorDashboard() {
         g.subjects.some(s => s.subject_code?.toLowerCase().includes(query) || s.subject_name?.toLowerCase().includes(query))
       );
     }
+    list.sort((a, b) => {
+      const batchA = normalizeBatch(a.batch || '');
+      const batchB = normalizeBatch(b.batch || '');
+      const batchComp = batchB.localeCompare(batchA, undefined, { numeric: true, sensitivity: 'base' });
+      if (batchComp !== 0) return batchComp;
+      return (Number(b.elective_number) || 1) - (Number(a.elective_number) || 1);
+    });
+    list.forEach(g => {
+      g.subjects.sort((a, b) => String(a.subject_code || '').localeCompare(String(b.subject_code || ''), undefined, { numeric: true, sensitivity: 'base' }));
+    });
     return list;
   }, [oeSubjects, oeSubjectFilters]);
 
-  // Check if PE Selection Drive is established & active for current selected batch + semester
+  // Check if PE Selection Drive is established & active for current selected batch + semester + elective number
   const currentPEDrive = useMemo(() => {
     return peDrives.find(d => 
       normalizeBatch(d.batch) === normalizeBatch(peOfferingBatch) && 
-      Number(d.semester) === Number(peOfferingSemester)
+      Number(d.semester) === Number(peOfferingSemester) &&
+      Number(d.elective_number || 1) === Number(peOfferingNumber || 1)
     );
-  }, [peDrives, peOfferingBatch, peOfferingSemester]);
+  }, [peDrives, peOfferingBatch, peOfferingSemester, peOfferingNumber]);
 
   const isPEDriveEstablished = !!currentPEDrive;
   const isPEDriveActive = currentPEDrive?.status === 'ACTIVE';
+
+  // -------------------------------------------------------------
+  // TAB 2: COMPUTED SELECTION DRIVES & SELECTED DRIVE DRILLDOWN
+  // -------------------------------------------------------------
+  const filteredPeDrives = useMemo(() => {
+    return sortedPeDrives.filter(d => {
+      if (peDriveFilters.batch !== 'ALL' && normalizeBatch(d.batch) !== normalizeBatch(peDriveFilters.batch)) {
+        return false;
+      }
+      if (peDriveFilters.semester !== 'ALL' && Number(d.semester) !== Number(peDriveFilters.semester)) {
+        return false;
+      }
+      if (peDriveFilters.status !== 'ALL') {
+        const isPastDue = Boolean(d.due_date && new Date() > new Date(d.due_date));
+        if (peDriveFilters.status === 'ACTIVE' && (d.status !== 'ACTIVE' || isPastDue)) return false;
+        if (peDriveFilters.status === 'LOCKED' && d.status === 'ACTIVE') return false;
+        if (peDriveFilters.status === 'EXPIRED' && !isPastDue) return false;
+      }
+      if (peDriveFilters.search && peDriveFilters.search.trim()) {
+        const q = peDriveFilters.search.toLowerCase().trim();
+        const titleMatch = d.title?.toLowerCase().includes(q);
+        const batchMatch = d.batch?.toLowerCase().includes(q);
+        const numMatch = `pe-${d.elective_number}`.includes(q) || `pe ${d.elective_number}`.includes(q);
+        if (!titleMatch && !batchMatch && !numMatch) return false;
+      }
+      return true;
+    });
+  }, [sortedPeDrives, peDriveFilters]);
+
+  // Selected drive object for Tabular Control Panel
+  const activeSelectedDrive = useMemo(() => {
+    if (selectedPEDriveId) {
+      const found = sortedPeDrives.find(d => d.id === selectedPEDriveId);
+      if (found) return found;
+    }
+    return filteredPeDrives[0] || sortedPeDrives[0] || null;
+  }, [sortedPeDrives, filteredPeDrives, selectedPEDriveId]);
+
+  // Subject Offerings for the active selected drive
+  const selectedDriveSubjects = useMemo(() => {
+    if (!activeSelectedDrive) return [];
+    return peSubjects.filter(s => 
+      normalizeBatch(s.admitted_batch) === normalizeBatch(activeSelectedDrive.batch) &&
+      Number(s.semester) === Number(activeSelectedDrive.semester) &&
+      Number(s.elective_number || 1) === Number(activeSelectedDrive.elective_number || 1)
+    );
+  }, [activeSelectedDrive, peSubjects]);
+
+  // Students, preferences & allotments for the active selected drive
+  const selectedDriveStudentsData = useMemo(() => {
+    if (!activeSelectedDrive) {
+      return { eligible: [], submitted: [], submittedCount: 0, allotted: [], waitlisted: [], pending: [] };
+    }
+    const cleanBatch = normalizeBatch(activeSelectedDrive.batch);
+    const cleanSem = Number(activeSelectedDrive.semester || 5);
+    const targetElectiveNum = Number(activeSelectedDrive.elective_number || 1);
+
+    const eligible = students.filter(st => {
+      const matchBatch = !st.admitted_batch || normalizeBatch(st.admitted_batch) === cleanBatch;
+      const matchSem = Number(st.semester) === cleanSem;
+      return matchBatch && matchSem;
+    });
+
+    const eligibleIds = new Set(eligible.map(st => st.id));
+    const eligibleEmails = new Set(eligible.map(st => st.email?.toLowerCase().trim()).filter(Boolean));
+
+    const allots = allotments.filter(a => {
+      const matchElective = (!a.elective_type || a.elective_type === 'PE') && Number(a.elective_number || 1) === targetElectiveNum;
+      const matchStudent = eligibleIds.has(a.student_id) || (a.student_email && eligibleEmails.has(a.student_email.toLowerCase().trim()));
+      return matchElective && matchStudent;
+    });
+
+    const allotted = allots.filter(a => a.status === 'ALLOTTED');
+    const waitlisted = allots.filter(a => a.status === 'WAITLISTED');
+    const submittedStudentIds = new Set(allots.map(a => a.student_id || a.student_email));
+
+    const pending = eligible.filter(st => {
+      return !submittedStudentIds.has(st.id) && !(st.email && submittedStudentIds.has(st.email.toLowerCase().trim()));
+    });
+
+    return {
+      eligible,
+      submitted: allots,
+      submittedCount: allots.length,
+      allotted,
+      waitlisted,
+      pending
+    };
+  }, [activeSelectedDrive, students, allotments]);
 
   // -------------------------------------------------------------
   // TAB 1: CURRICULUM HANDLERS
@@ -663,17 +860,18 @@ export default function CoordinatorDashboard() {
   const handleStartPEDrive = async (drive) => {
     const matchingSubjects = peSubjects.filter(s => 
       normalizeBatch(s.admitted_batch) === normalizeBatch(drive.batch) &&
-      Number(s.semester) === Number(drive.semester)
+      Number(s.semester) === Number(drive.semester) &&
+      Number(s.elective_number || 1) === Number(drive.elective_number || 1)
     );
 
     if (matchingSubjects.length === 0) {
-      showToast(`Cannot start PE Selection Drive for Batch ${drive.batch} (Sem ${drive.semester}). Please configure and offer subjects in Tab 3 (Add Subjects & Students) first.`, 'error');
+      showToast(`Cannot start PE Selection Drive for Batch ${drive.batch} (Sem ${drive.semester}, PE-${drive.elective_number || 1}). Please configure and offer subjects in Tab 3 (Elective Offerings) first.`, 'error');
       return;
     }
 
     try {
-      await coordinatorService.startPESelectionWindow(drive.id);
-      showToast(`PE Selection Drive STARTED and is now OPEN for students.`, 'success');
+      await coordinatorService.startPESelectionWindow(drive.id, drive);
+      showToast(`PE Selection Drive (PE-${drive.elective_number || 1}) STARTED and is now OPEN for students.`, 'success');
       loadAllData();
     } catch (err) {
       showToast(err.message || 'Failed to start drive.', 'error');
@@ -699,6 +897,247 @@ export default function CoordinatorDashboard() {
       } catch (err) {
         showToast(err.message || 'Failed to delete drive.', 'error');
       }
+    }
+  };
+
+  // 1. Reveal / Hide Allotments Handler with Password Confirmation
+  const handleOpenRevealModal = (drive) => {
+    setSelectedDriveForReveal(drive);
+    setRevealPassword('');
+    setRevealError('');
+    setRevealModalOpen(true);
+  };
+
+  const handleConfirmReveal = async (e) => {
+    e.preventDefault();
+    if (!selectedDriveForReveal) return;
+    setRevealError('');
+
+    try {
+      setRevealLoading(true);
+      // Verify coordinator password
+      await verifyCurrentPassword(revealPassword);
+
+      const willReveal = !selectedDriveForReveal.allotment_revealed;
+      await coordinatorService.toggleRevealPEAllotment(selectedDriveForReveal.id, willReveal);
+
+      showToast(
+        willReveal 
+          ? `Allotments for ${selectedDriveForReveal.title} are now REVEALED and visible to students.` 
+          : `Allotments for ${selectedDriveForReveal.title} are now HIDDEN from students.`,
+        'success'
+      );
+
+      setRevealModalOpen(false);
+      loadAllData();
+    } catch (err) {
+      setRevealError(err.message || 'Failed to update allotment visibility.');
+    } finally {
+      setRevealLoading(false);
+    }
+  };
+
+  // 2. Set / Edit Due Date Handler
+  const handleOpenDueDateModal = (drive) => {
+    setSelectedDriveForDueDate(drive);
+    setNewDriveDueDate(drive.due_date ? new Date(drive.due_date).toISOString().slice(0, 16) : '');
+    setDueDateError('');
+    setDueDateModalOpen(true);
+  };
+
+  const handleSaveDueDate = async (e) => {
+    e.preventDefault();
+    if (!selectedDriveForDueDate) return;
+    setDueDateError('');
+
+    try {
+      setDueDateLoading(true);
+      const isoDueDate = newDriveDueDate ? new Date(newDriveDueDate).toISOString() : null;
+      await coordinatorService.updatePEDriveDueDate(selectedDriveForDueDate.id, isoDueDate);
+
+      showToast(
+        isoDueDate 
+          ? `Selection deadline set to ${new Date(isoDueDate).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })}.` 
+          : 'Selection deadline cleared (No expiration).',
+        'success'
+      );
+
+      setDueDateModalOpen(false);
+      loadAllData();
+    } catch (err) {
+      setDueDateError(err.message || 'Failed to update selection due date.');
+    } finally {
+      setDueDateLoading(false);
+    }
+  };
+
+  // 3. Auto Allocate / Reallocate Handler with Progress Tracking & Password Confirmation
+  const handleOpenAutoAllocateModal = (drive) => {
+    setSelectedDriveForAutoAllocate(drive);
+    setAutoAllocatePassword('');
+    setAutoAllocateError('');
+    setAutoAllocateProgress(0);
+    setAutoAllocatePhase('');
+    setAutoAllocateModalOpen(true);
+  };
+
+  const handleConfirmAutoAllocate = async (e) => {
+    e.preventDefault();
+    if (!selectedDriveForAutoAllocate) return;
+    setAutoAllocateError('');
+
+    try {
+      setAutoAllocateLoading(true);
+      setAutoAllocateProgress(0);
+      setAutoAllocatePhase('Verifying coordinator credentials & security authorization (0%)...');
+
+      // Verify coordinator password
+      await verifyCurrentPassword(autoAllocatePassword);
+
+      let currentProgress = 0;
+      let isTaskFinished = false;
+      let taskResult = null;
+      let taskError = null;
+
+      // Execute backend allocation in background
+      const allocationPromise = (async () => {
+        try {
+          taskResult = await coordinatorService.autoAllocatePEStudents(selectedDriveForAutoAllocate, coordinatorBranch);
+        } catch (err) {
+          taskError = err;
+        } finally {
+          isTaskFinished = true;
+        }
+      })();
+
+      // Smooth step-by-step progress ticker without missing any number (0 -> 98)
+      while (!isTaskFinished && currentProgress < 98) {
+        currentProgress += 1;
+        setAutoAllocateProgress(currentProgress);
+
+        if (currentProgress <= 25) {
+          setAutoAllocatePhase(`Scanning enrolled students & verifying batch eligibility (${currentProgress}%)...`);
+        } else if (currentProgress <= 55) {
+          setAutoAllocatePhase(`Evaluating waitlist queues & checking subject vacancies (${currentProgress}%)...`);
+        } else if (currentProgress <= 75) {
+          setAutoAllocatePhase(`Allocating priority preferences & balancing section quotas (${currentProgress}%)...`);
+        } else {
+          setAutoAllocatePhase(`Writing allotments to database & updating live seats (${currentProgress}%)...`);
+        }
+
+        const delay = currentProgress <= 20 ? 40
+          : currentProgress <= 45 ? 55
+          : currentProgress <= 70 ? 75
+          : currentProgress <= 85 ? 110
+          : currentProgress <= 94 ? 160
+          : 240;
+
+        await new Promise(r => setTimeout(r, delay));
+      }
+
+      // Wait for backend completion
+      await allocationPromise;
+
+      if (taskError) {
+        throw taskError;
+      }
+
+      // Smoothly tick every single remaining number up to 100 without skipping any integer
+      while (currentProgress < 100) {
+        currentProgress += 1;
+        setAutoAllocateProgress(currentProgress);
+        setAutoAllocatePhase(`Finalizing allotments & synchronizing live seats (${currentProgress}%)...`);
+        await new Promise(r => setTimeout(r, 15));
+      }
+
+      setAutoAllocatePhase('Allotment & reallocation completed successfully (100%)!');
+      await new Promise(r => setTimeout(r, 400));
+
+      if (taskResult?.count > 0) {
+        showToast(`Successfully auto-allocated / reallocated ${taskResult.count} student(s) section-wise!`, 'success');
+      } else {
+        showToast(taskResult?.message || 'All eligible students are already allotted.', 'info');
+      }
+
+      setAutoAllocateModalOpen(false);
+      setAutoAllocatePassword('');
+      setAutoAllocateProgress(0);
+      setAutoAllocatePhase('');
+      loadAllData();
+    } catch (err) {
+      setAutoAllocateError(err.message || 'Failed to execute auto allocation / reallocation.');
+    } finally {
+      setAutoAllocateLoading(false);
+    }
+  };
+
+  const handleUndoAutoAllocate = async (drive) => {
+    const eNum = Number(drive?.elective_number || 1);
+    const confirmed = window.confirm(`Are you sure you want to undo auto-allocated assignments for PE-${eNum}?\n\nAuto-assigned student allotments will be cleared so you can increase subject seats and reallocate. Submitted student priority choices are 100% safe and preserved.`);
+    if (!confirmed) return;
+
+    try {
+      showToast(`Reverting automated allocations for PE-${eNum}...`, 'info');
+      const res = await coordinatorService.undoAutoAllocatePE(drive, coordinatorBranch);
+      showToast(res.message || `Reverted ${res.revertedCount || 0} auto-allocated assignments.`, 'success');
+      loadAllData();
+    } catch (err) {
+      console.error('Undo auto-allocate error:', err);
+      showToast(err.message || 'Failed to undo auto-allocation.', 'error');
+    }
+  };
+
+  const handleSendDeadlineReminderPE = async (drive) => {
+    try {
+      const cleanBatch = normalizeBatch(drive.batch || '');
+      const cleanSem = Number(drive.semester || 5);
+      const cleanBranch = String(drive.branch || coordinatorBranch || 'CSE').trim().toUpperCase();
+      const eNum = Number(drive.elective_number || 1);
+
+      const driveObj = {
+        ...drive,
+        batch: cleanBatch,
+        semester: cleanSem,
+        branch: cleanBranch,
+        elective_number: eNum
+      };
+
+      const batchStudents = students.filter(s => {
+        if (s.role && s.role !== 'student') return false;
+        const sBatch = normalizeBatch(s.admitted_batch || s.batch || '');
+        const sBranch = String(s.branch || '').trim().toUpperCase();
+
+        const matchBatch = !cleanBatch || sBatch === cleanBatch;
+        const matchBranch = !cleanBranch || sBranch === cleanBranch;
+        return matchBatch && matchBranch;
+      });
+
+      const result = await notificationService.sendDeadlineReminderEmail({
+        driveType: 'PE',
+        drive: driveObj,
+        students: batchStudents,
+        pendingOnly: true
+      });
+
+      if (result.count > 0) {
+        window.open(result.mailtoUrl, '_blank');
+        showToast(`24-Hour Reminder email prepared for ${result.count} pending student(s) in Batch ${cleanBatch} (${cleanBranch} • PE-${eNum})!`, 'success');
+      } else {
+        showToast(result.message || `All students in Batch ${cleanBatch} (${cleanBranch}) have already submitted choices for PE-${eNum}!`, 'info');
+      }
+    } catch (err) {
+      showToast(err.message || 'Failed to dispatch deadline reminders.', 'error');
+    }
+  };
+
+  const handleRedoAutoAllocate = async (driveOrId) => {
+    const driveObj = typeof driveOrId === 'object' ? driveOrId : (peDrives.find(d => d.id === driveOrId) || driveOrId);
+    try {
+      const result = await coordinatorService.redoAutoAllocatePE(driveObj);
+      showToast(`Redone auto-allocation: ${result.restoredCount} student allotment(s) re-allocated.`, 'success');
+      loadAllData();
+    } catch (err) {
+      showToast(err.message || 'Failed to redo auto allocation.', 'error');
     }
   };
 
@@ -820,11 +1259,28 @@ export default function CoordinatorDashboard() {
       return;
     }
 
+    const matchingOEDrive = adminWindows.find(w => 
+      String(w.elective_type || '').toUpperCase() === 'OE' &&
+      normalizeBatch(w.batch) === normalizeBatch(oeOfferingBatch) &&
+      Number(w.semester) === Number(oeOfferingSemester) &&
+      Number(w.elective_number || 1) === Number(oeOfferingNumber)
+    );
+
+    if (!matchingOEDrive) {
+      showToast(`Cannot add OE offerings: The OE Selection Drive for Batch ${oeOfferingBatch} • Semester ${oeOfferingSemester} • OE-${oeOfferingNumber} has not been created by the College Administrator yet. The Administrator must create the OE Selection Drive in Setup Mode (LOCKED) first.`, 'error');
+      return;
+    }
+
+    if (matchingOEDrive.status === 'ACTIVE') {
+      showToast(`Cannot modify OE offerings while the OE Selection Drive is ACTIVE for Batch ${oeOfferingBatch} (Semester ${oeOfferingSemester}). The College Administrator must pause the drive first.`, 'error');
+      return;
+    }
+
     try {
       setOeActivatingLoading(true);
       const itemsToActivate = oeSelectedCurriculumIds.map(currId => {
         const curr = curriculumList.find(c => c.id === currId);
-        const targetBranches = oeCurriculumBranchesMap[currId] || (curr?.offered_branches || ['ALL']);
+        const targetBranches = parseOfferedBranches(oeCurriculumBranchesMap[currId] || curr?.offered_branches, ['ALL']);
         const rawSeat = oeCurriculumSeatMap[currId];
         const seatVal = (rawSeat !== undefined && rawSeat !== '' && !isNaN(Number(rawSeat))) 
           ? Math.max(1, parseInt(rawSeat, 10)) 
@@ -1153,8 +1609,8 @@ Nadimpalli Satyanarayana Raju Institute of Technology (NSRIT)`
       if (analyticsSemester !== 'ALL' && Number(st.semester) !== Number(analyticsSemester)) return false;
       return true;
     });
-    const set = Array.from(new Set(pool.map(s => String(s.section || 'A').trim().toUpperCase()).filter(Boolean))).sort();
-    return set.length > 0 ? set : ['A', 'B', 'C'];
+    const set = Array.from(new Set(pool.map(s => String(s.section || '').trim().toUpperCase()).filter(Boolean))).sort();
+    return set;
   }, [rawAnalyticsStudents, analyticsElectiveType, coordinatorBranch, analyticsBatch, analyticsSemester]);
 
   const availableAnalyticsBranches = useMemo(() => {
@@ -1163,7 +1619,7 @@ Nadimpalli Satyanarayana Raju Institute of Technology (NSRIT)`
       return true;
     });
     const set = Array.from(new Set(pool.map(s => String(s.branch || '').trim().toUpperCase()).filter(Boolean))).sort();
-    return set.length > 0 ? set : ['ECE', 'MECH', 'CIVIL', 'EEE', 'AIML', 'IT'];
+    return set;
   }, [rawAnalyticsStudents, analyticsBatch]);
 
   // Filtered subjects
@@ -1521,7 +1977,7 @@ Nadimpalli Satyanarayana Raju Institute of Technology (NSRIT)`
     }
   };
 
-  // Student Directory filtered list for Tab 3 Step 3
+  // Student Directory filtered list for Tab 3 Step 3 (Sorted by Roll Number)
   const activeDirectoryStudents = students.filter(st => {
     if (drilldownBatch && normalizeBatch(st.admitted_batch) !== normalizeBatch(drilldownBatch)) return false;
     if (drilldownSection && (st.section || 'A') !== drilldownSection) return false;
@@ -1533,7 +1989,7 @@ Nadimpalli Satyanarayana Raju Institute of Technology (NSRIT)`
              st.roll_number?.toLowerCase().includes(q);
     }
     return true;
-  });
+  }).sort((a, b) => (a.roll_number || '').localeCompare(b.roll_number || '', undefined, { numeric: true, sensitivity: 'base' }));
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8">
@@ -1702,7 +2158,7 @@ Nadimpalli Satyanarayana Raju Institute of Technology (NSRIT)`
                     title="Download formatted Excel template for curriculum"
                   >
                     <Download className="w-3.5 h-3.5 text-gray-500" />
-                    <span>Download Sample Template</span>
+                    <span>Download Curriculum Template</span>
                   </button>
 
                   {/* Upload Excel */}
@@ -1740,7 +2196,7 @@ Nadimpalli Satyanarayana Raju Institute of Technology (NSRIT)`
 
                 {curriculumSummaries.length > 0 ? (
                   <div className="space-y-4">
-                    {curriculumSummaries.map((sum) => {
+                    {[...curriculumSummaries].sort((a, b) => (b.batch || '').localeCompare(a.batch || '', undefined, { numeric: true, sensitivity: 'base' })).map((sum) => {
                       const isExpanded = !!expandedCurriculumBatchKeys[sum.batch];
                       const allBatchSubjects = (sum.subjects && sum.subjects.length > 0)
                         ? sum.subjects
@@ -1758,6 +2214,24 @@ Nadimpalli Satyanarayana Raju Institute of Technology (NSRIT)`
                           return matchCode || matchName;
                         }
                         return true;
+                      }).sort((a, b) => {
+                        const semA = Number(a.semester || 0);
+                        const semB = Number(b.semester || 0);
+                        if (semA !== semB) return semA - semB;
+
+                        const typeA = String(a.elective_type || '').toUpperCase();
+                        const typeB = String(b.elective_type || '').toUpperCase();
+                        if (typeA !== typeB) {
+                          if (typeA === 'PE') return -1;
+                          if (typeB === 'PE') return 1;
+                          return typeA.localeCompare(typeB);
+                        }
+
+                        const numA = Number(a.elective_number || 1);
+                        const numB = Number(b.elective_number || 1);
+                        if (numA !== numB) return numA - numB;
+
+                        return String(a.subject_code || '').localeCompare(String(b.subject_code || ''), undefined, { numeric: true, sensitivity: 'base' });
                       });
 
                       return (
@@ -2101,14 +2575,14 @@ Nadimpalli Satyanarayana Raju Institute of Technology (NSRIT)`
                       Select an Academic Batch to View Sections ({coordinatorBranch})
                     </h3>
                     <span className="text-xs text-gray-500">
-                      {availableBatches.length} Batches Active
+                      {studentBatches.length} Batches Active
                     </span>
                   </div>
 
-                  {availableBatches.length > 0 ? (
+                  {studentBatches.length > 0 ? (
                     <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5">
-                      {availableBatches.map(b => {
-                        const batchStudents = students.filter(s => normalizeBatch(s.admitted_batch) === normalizeBatch(b));
+                      {studentBatches.map(b => {
+                        const batchStudents = students.filter(s => normalizeBatch(s.admitted_batch || s.batch) === normalizeBatch(b));
                         const sections = Array.from(new Set(batchStudents.map(s => s.section || 'A'))).sort();
                         const peSubmitted = batchStudents.filter(s => s.hasSubmittedPE).length;
 
@@ -2136,8 +2610,8 @@ Nadimpalli Satyanarayana Raju Institute of Technology (NSRIT)`
                               <span className="text-gray-600 font-medium">
                                 {sections.length} Section{sections.length > 1 ? 's' : ''} ({sections.map(s => `Sec ${s}`).join(', ') || 'None'})
                               </span>
-                              <span className="text-emerald-700 font-bold">
-                                {peSubmitted} / {batchStudents.length} Submitted
+                              <span className="text-gray-600 font-semibold">
+                                {batchStudents.length} Students Enrolled
                               </span>
                             </div>
                           </div>
@@ -2178,7 +2652,7 @@ Nadimpalli Satyanarayana Raju Institute of Technology (NSRIT)`
                   </div>
 
                   {(() => {
-                    const batchStudents = students.filter(s => normalizeBatch(s.admitted_batch) === normalizeBatch(drilldownBatch));
+                    const batchStudents = students.filter(s => normalizeBatch(s.admitted_batch || s.batch) === normalizeBatch(drilldownBatch));
                     const sections = Array.from(new Set(batchStudents.map(s => s.section || 'A'))).sort();
 
                     return (
@@ -2211,8 +2685,8 @@ Nadimpalli Satyanarayana Raju Institute of Technology (NSRIT)`
 
                                   <div className="pt-3 border-t border-gray-100 flex items-center justify-between text-xs">
                                     <span className="text-gray-500 font-medium">Batch {drilldownBatch}</span>
-                                    <span className="text-emerald-700 font-bold">
-                                      {peSubmitted} Submitted
+                                    <span className="text-gray-600 font-semibold">
+                                      {coordinatorBranch} • Sec {sec}
                                     </span>
                                   </div>
                                 </div>
@@ -2372,8 +2846,6 @@ Nadimpalli Satyanarayana Raju Institute of Technology (NSRIT)`
                           <th className="px-4 py-3">Regulation</th>
                           <th className="px-4 py-3">Branch & Sec</th>
                           <th className="px-4 py-3">Semester</th>
-                          <th className="px-4 py-3 text-center">PE Status</th>
-                          <th className="px-4 py-3 text-center">OE Status</th>
                           <th className="px-4 py-3 text-right">Actions</th>
                         </tr>
                       </thead>
@@ -2399,20 +2871,6 @@ Nadimpalli Satyanarayana Raju Institute of Technology (NSRIT)`
                               <td className="px-4 py-3 font-bold text-gray-600">{st.regulation || 'AR23'}</td>
                               <td className="px-4 py-3 font-medium text-gray-700">{st.branch} - Sec {st.section || 'A'}</td>
                               <td className="px-4 py-3 text-gray-600">Semester {st.semester}</td>
-                              <td className="px-4 py-3 text-center">
-                                <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                                  st.hasSubmittedPE ? 'bg-emerald-100 text-emerald-800' : 'bg-gray-100 text-gray-600'
-                                }`}>
-                                  {st.hasSubmittedPE ? 'Locked' : 'Pending'}
-                                </span>
-                              </td>
-                              <td className="px-4 py-3 text-center">
-                                <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                                  st.hasSubmittedOE ? 'bg-emerald-100 text-emerald-800' : 'bg-gray-100 text-gray-600'
-                                }`}>
-                                  {st.hasSubmittedOE ? 'Locked' : 'Pending'}
-                                </span>
-                              </td>
                               <td className="px-4 py-3 text-right space-x-1.5">
                                 <button
                                   onClick={() => handleEditStudent(st)}
@@ -2486,117 +2944,492 @@ Nadimpalli Satyanarayana Raju Institute of Technology (NSRIT)`
       )}
 
       {/* ========================================================================= */}
-      {/* TAB 2: BATCH ALLOTMENT CONTROL (PE DRIVES EXCLUSIVELY) */}
+      {/* TAB 2: BATCH ALLOTMENT CONTROL (PE SELECTION DRIVE CARDS & TABULAR PANEL) */}
       {/* ========================================================================= */}
       {activeTab === 'PE_DRIVES' && (
-        <div className="space-y-6 no-print">
+        <div className="space-y-8 no-print">
           
-          {/* PE Selection Drives Table */}
-          <div className="bg-white rounded-3xl border border-gray-200 shadow-card overflow-hidden">
-            <div className="p-5 border-b border-gray-100 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-              <div>
-                <h3 className="text-base font-bold text-gray-900 font-display">
-                  Active & Scheduled PE Selection Windows ({coordinatorBranch})
-                </h3>
-                <p className="text-xs text-gray-500">
-                  {sortedPeDrives.length} {sortedPeDrives.length === 1 ? 'drive' : 'drives'} registered for {coordinatorBranch} department.
-                </p>
+          {/* 1. Header Toolbar */}
+          <div className="bg-white rounded-3xl border border-gray-200 shadow-card p-6 sm:p-8 flex flex-col md:flex-row md:items-center justify-between gap-4">
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-blue-100 text-blue-800 border border-blue-200">
+                  Professional Elective (PE) Selection Drives • {coordinatorBranch}
+                </span>
+                <span className="text-xs text-gray-500">• {sortedPeDrives.length} {sortedPeDrives.length === 1 ? 'drive' : 'drives'} registered</span>
+              </div>
+              <h2 className="text-xl sm:text-2xl font-black text-gray-900 font-display mt-1">
+                Active & Scheduled PE Selection Drives
+              </h2>
+              <p className="text-xs text-gray-500 max-w-2xl mt-0.5">
+                Manage student selection drives for {coordinatorBranch} department. Click on any drive card below to open its full <strong>Tabular Operational Control Panel</strong>.
+              </p>
+            </div>
+
+            <button
+              onClick={() => setPeDriveModalOpen(true)}
+              className="px-4 py-2.5 rounded-xl text-xs font-bold text-white crimson-gradient-btn flex items-center gap-2 shadow-sm flex-shrink-0"
+            >
+              <Plus className="w-4 h-4" />
+              <span>Configure New PE Selection Drive</span>
+            </button>
+          </div>
+
+          {/* 2. Filter Toolbar */}
+          <div className="bg-white p-4 rounded-2xl border border-gray-200 shadow-card flex flex-wrap items-center justify-between gap-3">
+            <div className="flex flex-wrap items-center gap-2.5">
+              <div className="relative w-56">
+                <Search className="w-3.5 h-3.5 text-gray-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                <input
+                  type="text"
+                  placeholder="Search drive title / batch / PE..."
+                  value={peDriveFilters.search}
+                  onChange={(e) => setPeDriveFilters({ ...peDriveFilters, search: e.target.value })}
+                  className="w-full pl-8 pr-2.5 py-1.5 rounded-xl border border-gray-300 text-xs"
+                />
               </div>
 
-              <button
-                onClick={() => setPeDriveModalOpen(true)}
-                className="px-4 py-2.5 rounded-xl text-xs font-bold text-white crimson-gradient-btn flex items-center gap-2 shadow-sm flex-shrink-0"
+              <select
+                value={peDriveFilters.batch}
+                onChange={(e) => setPeDriveFilters({ ...peDriveFilters, batch: e.target.value })}
+                className="px-2.5 py-1.5 rounded-xl border border-gray-300 text-xs font-bold bg-white"
               >
-                <Plus className="w-4 h-4" />
-                <span>Configure New PE Selection Drive</span>
-              </button>
+                <option value="ALL">All Batches</option>
+                {peCurriculumBatches.map(b => (
+                  <option key={b} value={b}>Batch {b}</option>
+                ))}
+              </select>
+
+              <select
+                value={peDriveFilters.semester}
+                onChange={(e) => setPeDriveFilters({ ...peDriveFilters, semester: e.target.value })}
+                className="px-2.5 py-1.5 rounded-xl border border-gray-300 text-xs font-bold bg-white"
+              >
+                <option value="ALL">All Semesters</option>
+                {[5, 6, 7, 8, 1, 2, 3, 4].map(s => (
+                  <option key={s} value={s}>Semester {s}</option>
+                ))}
+              </select>
+
+              <select
+                value={peDriveFilters.status}
+                onChange={(e) => setPeDriveFilters({ ...peDriveFilters, status: e.target.value })}
+                className="px-2.5 py-1.5 rounded-xl border border-gray-300 text-xs font-bold bg-white"
+              >
+                <option value="ALL">All Statuses</option>
+                <option value="ACTIVE">Selection Open (Active)</option>
+                <option value="LOCKED">Paused / Locked</option>
+                <option value="EXPIRED">Expired Deadline</option>
+              </select>
+
+              {(peDriveFilters.search || peDriveFilters.batch !== 'ALL' || peDriveFilters.semester !== 'ALL' || peDriveFilters.status !== 'ALL') && (
+                <button
+                  type="button"
+                  onClick={() => setPeDriveFilters({ batch: 'ALL', semester: 'ALL', status: 'ALL', search: '' })}
+                  className="px-2.5 py-1.5 rounded-xl border border-gray-300 text-xs font-bold text-gray-600 hover:text-crimson-700 hover:bg-gray-100 flex items-center gap-1 transition-colors shadow-2xs"
+                  title="Reset Filters"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  <span>Reset Filters</span>
+                </button>
+              )}
             </div>
 
-            <div className="overflow-x-auto">
-              <table className="w-full text-xs text-left">
-                <thead className="bg-gray-50 text-gray-600 border-b border-gray-200 uppercase font-bold tracking-wider">
-                  <tr>
-                    <th className="px-4 py-3.5">Academic Batch</th>
-                    <th className="px-4 py-3.5">Semester</th>
-                    <th className="px-4 py-3.5">Elective Category</th>
-                    <th className="px-4 py-3.5">Drive Title</th>
-                    <th className="px-4 py-3.5 text-center">Student Portal Status</th>
-                    <th className="px-4 py-3.5 text-right">Actions (Start / Stop / Delete)</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-100">
-                  {sortedPeDrives.map((win) => {
-                    const isActive = win.status === 'ACTIVE';
-                    return (
-                      <tr key={win.id} className="hover:bg-gray-50/80 transition-colors">
-                        <td className="px-4 py-4 font-mono font-bold text-gray-900 text-sm">
-                          {win.batch}
-                        </td>
-                        <td className="px-4 py-4 font-semibold text-gray-700">
-                          Semester {win.semester}
-                        </td>
-                        <td className="px-4 py-4">
-                          <span className="px-2.5 py-1 rounded-lg text-xs font-bold bg-blue-100 text-blue-800">
-                            Professional Elective (PE)
-                          </span>
-                        </td>
-                        <td className="px-4 py-4 font-medium text-gray-800">
-                          {win.title}
-                        </td>
-                        <td className="px-4 py-4 text-center">
-                          <span className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold ${
-                            isActive 
-                              ? 'bg-emerald-100 text-emerald-800 border border-emerald-300' 
-                              : 'bg-amber-50 text-amber-800 border border-amber-300'
-                          }`}>
-                            <span className={`w-2 h-2 rounded-full ${isActive ? 'bg-emerald-500 animate-pulse' : 'bg-amber-400'}`} />
-                            <span>{isActive ? 'SELECTION OPEN (ACTIVE)' : 'LOCKED (PENDING SETUP)'}</span>
-                          </span>
-                        </td>
-                        <td className="px-4 py-4 text-right space-x-2">
-                          {!isActive ? (
-                            <button
-                              onClick={() => handleStartPEDrive(win)}
-                              className="px-3.5 py-1.5 rounded-xl text-xs font-bold transition-all inline-flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white shadow-emerald-700/20 shadow-sm"
-                              title="Open selection for students in this batch"
-                            >
-                              <Play className="w-3.5 h-3.5 fill-current" />
-                              <span>Start Selection</span>
-                            </button>
-                          ) : (
-                            <button
-                              onClick={() => handleStopPEDrive(win.id, win.title)}
-                              className="px-3.5 py-1.5 rounded-xl text-xs font-bold transition-all inline-flex items-center gap-1.5 bg-amber-100 hover:bg-amber-200 text-amber-900 border border-amber-300 shadow-2xs"
-                              title="Stop/pause selection for students"
-                            >
-                              <Pause className="w-3.5 h-3.5 fill-current" />
-                              <span>Stop / Pause Selection</span>
-                            </button>
-                          )}
-                          <button
-                            onClick={() => handleDeletePEDrive(win.id, win.title)}
-                            className="p-1.5 text-gray-500 hover:text-red-700 hover:bg-red-50 rounded-lg transition-colors inline-flex items-center gap-1 text-xs font-bold"
-                            title="Delete Drive"
-                          >
-                            <Trash2 className="w-4 h-4 text-red-600" />
-                            <span>Delete</span>
-                          </button>
-                        </td>
-                      </tr>
-                    );
-                  })}
-
-                  {sortedPeDrives.length === 0 && (
-                    <tr>
-                      <td colSpan="6" className="py-12 text-center text-gray-400">
-                        No PE selection drives configured for {coordinatorBranch}. Click <strong>Configure New PE Selection Drive</strong> above to establish one.
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
+            <div className="text-xs text-gray-500 font-medium">
+              Showing <strong>{filteredPeDrives.length}</strong> of <strong>{sortedPeDrives.length}</strong> drive{sortedPeDrives.length !== 1 ? 's' : ''}
             </div>
           </div>
+
+          {/* 3. Selection Drive Cards List (Accordion style matching Offerings with Respective Options) */}
+          {filteredPeDrives.length > 0 ? (
+            <div className="space-y-6">
+              {filteredPeDrives.map((win) => {
+                const isActive = win.status === 'ACTIVE';
+                const isRevealed = Boolean(win.allotment_revealed);
+                const isPastDue = Boolean(win.due_date && new Date() > new Date(win.due_date));
+                const isExpanded = expandedPEDriveKeys[win.id] !== undefined 
+                  ? expandedPEDriveKeys[win.id] 
+                  : (selectedPEDriveId === win.id || filteredPeDrives.length === 1);
+
+                const matchingCourses = peSubjects.filter(s => 
+                  normalizeBatch(s.admitted_batch) === normalizeBatch(win.batch) &&
+                  Number(s.semester) === Number(win.semester) &&
+                  Number(s.elective_number || 1) === Number(win.elective_number || 1)
+                );
+                const totalSeats = matchingCourses.reduce((sum, s) => sum + (Number(s.seats) || 0), 0);
+                const totalVacancies = matchingCourses.reduce((sum, s) => sum + (Number(s.available_seats) || 0), 0);
+                const totalAllotted = totalSeats - totalVacancies;
+
+                const cleanBatch = normalizeBatch(win.batch);
+                const cleanSem = Number(win.semester || 5);
+                const targetElectiveNum = Number(win.elective_number || 1);
+                const cleanBranch = String(win.branch || coordinatorBranch || 'CSE').trim().toUpperCase();
+
+                const eligible = students.filter(st => {
+                  const matchBatch = !cleanBatch || normalizeBatch(st.admitted_batch || st.batch) === cleanBatch;
+                  const matchBranch = !cleanBranch || String(st.branch || '').trim().toUpperCase() === cleanBranch;
+                  return matchBatch && matchBranch;
+                });
+
+                const eligibleIds = new Set(eligible.map(st => st.id));
+                const eligibleEmails = new Set(eligible.map(st => st.email?.toLowerCase().trim()).filter(Boolean));
+
+                const allots = allotments.filter(a => {
+                  const matchElective = (!a.elective_type || a.elective_type === 'PE') && Number(a.elective_number || 1) === targetElectiveNum;
+                  const matchBatch = !cleanBatch || normalizeBatch(a.admitted_batch || a.batch) === cleanBatch;
+                  const matchStudent = eligibleIds.has(a.student_id) || (a.student_email && eligibleEmails.has(a.student_email.toLowerCase().trim()));
+                  return matchElective && (matchStudent || matchBatch);
+                });
+
+                const allotted = allots.filter(a => a.status === 'ALLOTTED');
+                const waitlisted = allots.filter(a => a.status === 'WAITLISTED');
+                const autoAllottedCount = allots.filter(a => a.is_auto_allocated).length;
+
+                const driveHistory = coordinatorService.getPEAutoAllocationHistory 
+                  ? coordinatorService.getPEAutoAllocationHistory({
+                      windowId: win.id,
+                      batch: win.batch,
+                      semester: win.semester,
+                      branch: coordinatorBranch,
+                      electiveType: 'PE',
+                      elective_number: targetElectiveNum
+                    })
+                  : null;
+
+                const submittedStudentIds = new Set(allots.map(a => a.student_id || a.student_email));
+
+                const pending = eligible.filter(st => {
+                  return !submittedStudentIds.has(st.id) && !(st.email && submittedStudentIds.has(st.email.toLowerCase().trim()));
+                });
+
+                return (
+                  <div
+                    key={win.id}
+                    className={`bg-white rounded-3xl border-2 transition-all duration-200 overflow-hidden shadow-card ${
+                      isActive ? 'border-blue-300' : 'border-gray-200'
+                    }`}
+                  >
+                    {/* Card Header (Accordion style matching Offerings) */}
+                    <div
+                      onClick={() => {
+                        setSelectedPEDriveId(win.id);
+                        togglePEDriveKey(win.id);
+                      }}
+                      className="p-5 sm:p-6 bg-gradient-to-r from-blue-50/90 via-indigo-50/40 to-white hover:from-blue-100/80 hover:via-indigo-100/50 cursor-pointer border-b border-gray-200 flex flex-col xl:flex-row xl:items-center justify-between gap-4 select-none transition-colors"
+                    >
+                      <div className="flex items-center gap-3.5">
+                        <span className="px-3.5 py-2 rounded-2xl bg-blue-600 text-white font-mono font-black text-sm shadow-sm flex items-center gap-1.5 flex-shrink-0">
+                          <BookOpen className="w-4 h-4" />
+                          PE-{win.elective_number || 1}
+                        </span>
+
+                        <div className="space-y-1">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <h4 className="text-base sm:text-lg font-black text-gray-900 font-display">
+                              Batch {win.batch} • Semester {win.semester} • Professional Elective {win.elective_number || 1}
+                            </h4>
+
+                            {/* Status badges */}
+                            <span className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-bold ${
+                              isPastDue
+                                ? 'bg-rose-100 text-rose-800 border border-rose-300'
+                                : isActive 
+                                  ? 'bg-emerald-100 text-emerald-800 border border-emerald-300' 
+                                  : 'bg-amber-100 text-amber-900 border border-amber-300'
+                            }`}>
+                              <span className={`w-2 h-2 rounded-full ${isPastDue ? 'bg-rose-500' : isActive ? 'bg-emerald-500 animate-pulse' : 'bg-amber-400'}`} />
+                              <span>
+                                {isPastDue 
+                                  ? 'EXPIRED' 
+                                  : isActive 
+                                    ? 'SELECTION ACTIVE' 
+                                    : 'PAUSED / SETUP'}
+                              </span>
+                            </span>
+
+                            <span className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-bold border ${
+                              isRevealed 
+                                ? 'bg-emerald-50 text-emerald-800 border-emerald-300' 
+                                : 'bg-gray-100 text-gray-600 border-gray-200'
+                            }`}>
+                              {isRevealed ? <Eye className="w-3.5 h-3.5 text-emerald-600" /> : <EyeOff className="w-3.5 h-3.5 text-gray-400" />}
+                              <span>{isRevealed ? 'Results Public' : 'Results Hidden'}</span>
+                            </span>
+                          </div>
+
+                          <div className="flex flex-wrap items-center gap-2 text-xs text-gray-500">
+                            <span>{win.title}</span>
+                            <span>•</span>
+                            <span className="text-blue-700 font-semibold">{matchingCourses.length} Courses Configured</span>
+                            <span>•</span>
+                            <span>Deadline: <strong className="text-gray-700">{win.due_date ? new Date(win.due_date).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' }) : 'No Deadline'}</strong></span>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Header Quick Controls */}
+                      <div className="flex flex-wrap items-center gap-2" onClick={(e) => e.stopPropagation()}>
+                        {!isActive ? (
+                          <button
+                            type="button"
+                            onClick={() => handleStartPEDrive(win)}
+                            className="px-3.5 py-1.5 rounded-xl text-xs font-bold bg-emerald-600 hover:bg-emerald-700 text-white shadow-2xs inline-flex items-center gap-1.5 transition-colors"
+                            title="Open selection for students in this batch"
+                          >
+                            <Play className="w-3.5 h-3.5 fill-current" />
+                            <span>Start Drive</span>
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => handleStopPEDrive(win.id, win.title)}
+                            className="px-3.5 py-1.5 rounded-xl text-xs font-bold bg-amber-100 hover:bg-amber-200 text-amber-900 border border-amber-300 inline-flex items-center gap-1.5 transition-colors shadow-2xs"
+                            title="Pause selection for students"
+                          >
+                            <Pause className="w-3.5 h-3.5 fill-current" />
+                            <span>Pause Drive</span>
+                          </button>
+                        )}
+
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setOfferElectiveType('PE');
+                            setOfferElectiveDefaults({
+                              batch: win.batch,
+                              semester: Number(win.semester),
+                              elective_number: Number(win.elective_number || 1)
+                            });
+                            setOfferElectiveModalOpen(true);
+                          }}
+                          className="px-3 py-1.5 rounded-xl text-xs font-bold bg-blue-600 hover:bg-blue-700 text-white shadow-2xs inline-flex items-center gap-1 transition-colors"
+                          title="Offer courses from syllabus for this drive"
+                        >
+                          <Plus className="w-3.5 h-3.5" />
+                          <span>+ Offer Courses</span>
+                        </button>
+
+                        <span className="px-2.5 py-1 rounded-xl bg-white border border-gray-200 text-xs font-bold text-gray-700 shadow-2xs">
+                          {totalSeats} Seats
+                        </span>
+                        <span className="px-2.5 py-1 rounded-xl bg-emerald-50 border border-emerald-200 text-xs font-bold text-emerald-800">
+                          {totalVacancies} Vacant
+                        </span>
+                        <span className="px-2.5 py-1 rounded-xl bg-blue-50 border border-blue-200 text-xs font-bold text-blue-800">
+                          {totalAllotted} Filled
+                        </span>
+
+                        <button
+                          type="button"
+                          onClick={() => handleDeletePEDrive(win.id, win.title)}
+                          className="p-1.5 text-gray-400 hover:text-red-700 hover:bg-red-50 rounded-xl transition-colors border border-gray-200"
+                          title="Delete Drive"
+                        >
+                          <Trash2 className="w-4 h-4 text-red-600" />
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setSelectedPEDriveId(win.id);
+                            togglePEDriveKey(win.id);
+                          }}
+                          className="ml-1 px-3.5 py-1.5 rounded-xl bg-white hover:bg-blue-50 border border-gray-300 text-xs font-bold text-gray-800 hover:text-blue-700 flex items-center gap-1.5 shadow-2xs transition-colors"
+                        >
+                          <span>{isExpanded ? 'Hide Options' : 'View Options & Controls'}</span>
+                          {isExpanded ? <ChevronUp className="w-4 h-4 text-blue-600" /> : <ChevronDown className="w-4 h-4 text-blue-600" />}
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Card Body: Options & Tables for this Drive */}
+                    {isExpanded && (
+                      <div className="p-6 sm:p-8 space-y-8 bg-surface-50/40 animate-fadeIn">
+                        
+                        {/* 1. Operational Parameters & Actions Table */}
+                        <div className="bg-white rounded-2xl border border-gray-200 shadow-2xs overflow-hidden space-y-3 p-5">
+                          <div className="flex items-center justify-between">
+                            <h4 className="text-sm font-bold text-gray-900 font-display flex items-center gap-2">
+                              <Sliders className="w-4 h-4 text-crimson-700" />
+                              <span>1. Operational Drive Controls & Automation</span>
+                            </h4>
+                            <span className="text-[11px] text-gray-400">Settings and control options for this drive</span>
+                          </div>
+
+                          <div className="overflow-x-auto rounded-xl border border-gray-200">
+                            <table className="w-full text-xs text-left">
+                              <thead className="bg-gray-50 text-gray-600 border-b border-gray-200 uppercase font-bold text-[10px] tracking-wider">
+                                <tr>
+                                  <th className="px-4 py-3 w-1/4">Control Parameter</th>
+                                  <th className="px-4 py-3 w-2/5">Current Configuration</th>
+                                  <th className="px-4 py-3 text-right">Actions / Options</th>
+                                </tr>
+                              </thead>
+                              <tbody className="divide-y divide-gray-100">
+                                
+                                {/* Status */}
+                                <tr className="hover:bg-gray-50/80 transition-colors">
+                                  <td className="px-4 py-3.5 font-bold text-gray-900">
+                                    Selection Window Status
+                                  </td>
+                                  <td className="px-4 py-3.5">
+                                    {isActive ? (
+                                      <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold bg-emerald-100 text-emerald-800 border border-emerald-300">
+                                        <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+                                        <span>SELECTION OPEN (ACTIVE FOR STUDENTS)</span>
+                                      </span>
+                                    ) : (
+                                      <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold bg-amber-50 text-amber-800 border border-amber-300">
+                                        <span className="w-2 h-2 rounded-full bg-amber-400" />
+                                        <span>PAUSED / LOCKED (SETUP PHASE)</span>
+                                      </span>
+                                    )}
+                                  </td>
+                                  <td className="px-4 py-3.5 text-right">
+                                    {!isActive ? (
+                                      <button
+                                        onClick={() => handleStartPEDrive(win)}
+                                        className="px-3 py-1.5 rounded-xl text-xs font-bold bg-emerald-600 hover:bg-emerald-700 text-white inline-flex items-center gap-1 shadow-2xs"
+                                      >
+                                        <Play className="w-3 h-3 fill-current" />
+                                        <span>Start Selection</span>
+                                      </button>
+                                    ) : (
+                                      <button
+                                        onClick={() => handleStopPEDrive(win.id, win.title)}
+                                        className="px-3 py-1.5 rounded-xl text-xs font-bold bg-amber-100 hover:bg-amber-200 text-amber-900 border border-amber-300 inline-flex items-center gap-1 shadow-2xs"
+                                      >
+                                        <Pause className="w-3 h-3 fill-current" />
+                                        <span>Pause Selection</span>
+                                      </button>
+                                    )}
+                                  </td>
+                                </tr>
+
+                                {/* Deadline */}
+                                <tr className="hover:bg-gray-50/80 transition-colors">
+                                  <td className="px-4 py-3.5 font-bold text-gray-900">
+                                    Selection Deadline
+                                  </td>
+                                  <td className="px-4 py-3.5">
+                                    <div className="flex items-center gap-2">
+                                      <Clock className={`w-4 h-4 ${win.due_date ? 'text-crimson-600' : 'text-gray-400'}`} />
+                                      <span className="font-semibold text-gray-800">
+                                        {win.due_date 
+                                          ? new Date(win.due_date).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }) 
+                                          : 'No Deadline Configured (Continuous)'}
+                                      </span>
+                                      {win.due_date && new Date() > new Date(win.due_date) && (
+                                        <span className="px-2 py-0.5 rounded-md text-[10px] font-bold bg-rose-100 text-rose-800">
+                                          Expired
+                                        </span>
+                                      )}
+                                    </div>
+                                  </td>
+                                  <td className="px-4 py-3.5 text-right space-x-2">
+                                    <button
+                                      onClick={() => handleOpenDueDateModal(win)}
+                                      className="px-3 py-1.5 rounded-xl text-xs font-bold bg-gray-100 hover:bg-gray-200 text-gray-700 border border-gray-200 inline-flex items-center gap-1 shadow-2xs"
+                                    >
+                                      <Edit3 className="w-3 h-3" />
+                                      <span>{win.due_date ? 'Edit Deadline' : 'Set Deadline'}</span>
+                                    </button>
+
+                                    {isActive && win.due_date && new Date() <= new Date(win.due_date) && (
+                                      <button
+                                        onClick={() => handleSendDeadlineReminderPE(win)}
+                                        className="px-3 py-1.5 rounded-xl text-xs font-bold bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-200 inline-flex items-center gap-1"
+                                        title="Send 24-Hour Reminder Email to pending students"
+                                      >
+                                        <Mail className="w-3 h-3 text-amber-700" />
+                                        <span>Send 24h Reminder</span>
+                                      </button>
+                                    )}
+                                  </td>
+                                </tr>
+
+                                {/* Visibility */}
+                                <tr className="hover:bg-gray-50/80 transition-colors">
+                                  <td className="px-4 py-3.5 font-bold text-gray-900">
+                                    Student Result Visibility
+                                  </td>
+                                  <td className="px-4 py-3.5">
+                                    <span className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold border ${
+                                      win.allotment_revealed 
+                                        ? 'bg-emerald-50 text-emerald-800 border-emerald-300' 
+                                        : 'bg-gray-100 text-gray-700 border-gray-300'
+                                    }`}>
+                                      {win.allotment_revealed ? <Eye className="w-3.5 h-3.5 text-emerald-600" /> : <EyeOff className="w-3.5 h-3.5 text-gray-500" />}
+                                      <span>{win.allotment_revealed ? 'Published (Allotments Visible to Students)' : 'Hidden (Confidential / Pending Publication)'}</span>
+                                    </span>
+                                  </td>
+                                  <td className="px-4 py-3.5 text-right">
+                                    <button
+                                      onClick={() => handleOpenRevealModal(win)}
+                                      className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all inline-flex items-center gap-1 shadow-2xs ${
+                                        win.allotment_revealed 
+                                          ? 'bg-gray-100 hover:bg-gray-200 text-gray-700 border border-gray-300' 
+                                          : 'bg-emerald-600 hover:bg-emerald-700 text-white shadow-emerald-700/20'
+                                      }`}
+                                      title="Confirm password to publish / hide allotments"
+                                    >
+                                      {win.allotment_revealed ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3" />}
+                                      <span>{win.allotment_revealed ? 'Hide Results' : 'Publish Results to Students'}</span>
+                                    </button>
+                                  </td>
+                                </tr>
+
+                                {/* Auto Allocation */}
+                                <tr className="hover:bg-gray-50/80 transition-colors">
+                                  <td className="px-4 py-3.5 font-bold text-gray-900">
+                                    Automated Allocation Engine
+                                  </td>
+                                  <td className="px-4 py-3.5">
+                                    <div className="text-gray-600 text-xs">
+                                      Instant FIFO seat allocation with section-wise prioritization and automated waitlist promotion.
+                                    </div>
+                                  </td>
+                                  <td className="px-4 py-3.5 text-right">
+                                    <div className="inline-flex items-center justify-end gap-2 flex-wrap">
+                                      <button
+                                        onClick={() => handleUndoAutoAllocate(win)}
+                                        className="px-3.5 py-1.5 rounded-xl text-xs font-bold bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-300 shadow-2xs inline-flex items-center gap-1.5 transition-transform hover:scale-102 cursor-pointer"
+                                        title="Undo auto-allocated assignments for this PE drive to adjust seats and reallocate"
+                                      >
+                                        <RotateCcw className="w-3.5 h-3.5 text-amber-700" />
+                                        <span>Undo Auto-Allocate</span>
+                                      </button>
+                                      <button
+                                        onClick={() => handleOpenAutoAllocateModal(win)}
+                                        className="px-3.5 py-1.5 rounded-xl text-xs font-bold bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-700 hover:to-indigo-700 text-white shadow-sm shadow-purple-600/20 inline-flex items-center gap-1.5 transition-transform hover:scale-102"
+                                      >
+                                        <Wand2 className="w-3.5 h-3.5" />
+                                        <span>Auto Allocate / Reallocate</span>
+                                      </button>
+                                    </div>
+                                  </td>
+                                </tr>
+
+                              </tbody>
+                            </table>
+                          </div>
+                        </div>
+
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            <div className="p-12 text-center bg-white rounded-3xl border border-gray-200 shadow-card space-y-3">
+              <Calendar className="w-10 h-10 text-gray-400 mx-auto" />
+              <h4 className="text-base font-bold text-gray-900">No PE Selection Drives Found</h4>
+              <p className="text-xs text-gray-500 max-w-md mx-auto">
+                No selection drives match your current search or filter criteria. Click <strong>Configure New PE Selection Drive</strong> above to establish one.
+              </p>
+            </div>
+          )}
 
         </div>
       )}
@@ -2663,9 +3496,9 @@ Nadimpalli Satyanarayana Raju Institute of Technology (NSRIT)`
                     onClick={() => {
                       setOfferElectiveType('PE');
                       setOfferElectiveDefaults({
-                        batch: peCurriculumBatches[0] || (peSubjectFilters.batch !== 'ALL' ? peSubjectFilters.batch : ''),
-                        semester: 5,
-                        elective_number: 1
+                        batch: '',
+                        semester: '',
+                        elective_number: ''
                       });
                       setOfferElectiveModalOpen(true);
                     }}
@@ -2750,7 +3583,8 @@ Nadimpalli Satyanarayana Raju Institute of Technology (NSRIT)`
 
                       const groupDrive = peDrives.find(d => 
                         normalizeBatch(d.batch) === normalizeBatch(group.batch) && 
-                        Number(d.semester) === Number(group.semester)
+                        Number(d.semester) === Number(group.semester) &&
+                        Number(d.elective_number || 1) === Number(group.elective_number || 1)
                       );
                       const isGroupDriveActive = groupDrive?.status === 'ACTIVE';
                       const isGroupDriveEstablished = !!groupDrive;
@@ -2783,12 +3617,12 @@ Nadimpalli Satyanarayana Raju Institute of Technology (NSRIT)`
                                   ) : isGroupDriveEstablished ? (
                                     <span className="px-2.5 py-0.5 rounded-full bg-emerald-100 border border-emerald-300 text-emerald-800 font-bold text-[10px] flex items-center gap-1">
                                       <CheckCircle2 className="w-3 h-3 text-emerald-600" />
-                                      DRIVE PAUSED / READY
+                                      SETUP MODE (READY)
                                     </span>
                                   ) : (
-                                    <span className="px-2.5 py-0.5 rounded-full bg-gray-100 border border-gray-300 text-gray-700 font-bold text-[10px] flex items-center gap-1">
-                                      <AlertCircle className="w-3 h-3 text-gray-500" />
-                                      NO DRIVE ESTABLISHED
+                                    <span className="px-2.5 py-0.5 rounded-full bg-amber-50 border border-amber-200 text-amber-800 font-bold text-[10px] flex items-center gap-1">
+                                      <AlertCircle className="w-3 h-3 text-amber-600" />
+                                      DRIVE NOT ADDED
                                     </span>
                                   )}
                                 </div>
@@ -2799,6 +3633,66 @@ Nadimpalli Satyanarayana Raju Institute of Technology (NSRIT)`
                             </div>
 
                             <div className="flex flex-wrap items-center gap-2">
+                              {/* Direct Drive Controls on Card Header */}
+                              {isGroupDriveActive ? (
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleStopPEDrive(groupDrive.id, groupDrive.title);
+                                  }}
+                                  className="px-2.5 py-1 rounded-xl bg-amber-100 hover:bg-amber-200 border border-amber-300 text-amber-900 text-xs font-bold flex items-center gap-1 shadow-2xs transition-colors"
+                                  title="Pause Selection Drive for this offering"
+                                >
+                                  <Pause className="w-3.5 h-3.5 fill-current" />
+                                  <span>Pause Drive</span>
+                                </button>
+                              ) : isGroupDriveEstablished ? (
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleStartPEDrive(groupDrive);
+                                  }}
+                                  className="px-2.5 py-1 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold flex items-center gap-1 shadow-2xs transition-colors"
+                                  title="Start Selection Drive for this offering"
+                                >
+                                  <Play className="w-3.5 h-3.5 fill-current" />
+                                  <span>Start Drive</span>
+                                </button>
+                              ) : (
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setPeDriveModalDefaults({
+                                      batch: group.batch,
+                                      semester: group.semester,
+                                      elective_number: group.elective_number
+                                    });
+                                    setPeDriveModalOpen(true);
+                                  }}
+                                  className="px-2.5 py-1 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold flex items-center gap-1 shadow-2xs transition-colors"
+                                  title="Establish a dedicated PE Selection Drive for this batch & elective number"
+                                >
+                                  <Plus className="w-3.5 h-3.5" />
+                                  <span>+ Establish PE-{group.elective_number} Drive</span>
+                                </button>
+                              )}
+
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setActiveTab('PE_DRIVES');
+                                }}
+                                className="px-2.5 py-1 rounded-xl bg-gray-100 hover:bg-gray-200 text-gray-700 text-xs font-bold flex items-center gap-1 transition-colors"
+                                title="Go to Tab 2: PE Selection Drives"
+                              >
+                                <Calendar className="w-3.5 h-3.5 text-gray-500" />
+                                <span>Drive Control</span>
+                              </button>
+
                               <span className="px-2.5 py-1 rounded-xl bg-white border border-gray-200 text-xs font-bold text-gray-700 shadow-2xs">
                                 {totalSeats} Total Seats
                               </span>
@@ -2863,21 +3757,23 @@ Nadimpalli Satyanarayana Raju Institute of Technology (NSRIT)`
                                         <td className="px-5 py-3.5 text-right">
                                           <div className="flex items-center justify-end gap-1.5">
                                             <button
-                                              disabled={isGroupDriveActive}
+                                              disabled={!isGroupDriveEstablished || isGroupDriveActive}
                                               onClick={() => {
-                                                if (isGroupDriveActive) return;
+                                                if (!isGroupDriveEstablished || isGroupDriveActive) return;
                                                 setEditingSubject(s);
                                                 setSubjectModalType('PE');
                                                 setSubjectModalOpen(true);
                                               }}
                                               className={`px-2.5 py-1 text-xs font-bold rounded-lg flex items-center gap-1 transition-colors ${
-                                                isGroupDriveActive
+                                                (!isGroupDriveEstablished || isGroupDriveActive)
                                                   ? 'text-gray-400 bg-gray-100 border border-gray-200 cursor-not-allowed opacity-60'
                                                   : 'text-blue-700 bg-blue-50 hover:bg-blue-100 border border-blue-200'
                                               }`}
                                               title={
-                                                isGroupDriveActive
-                                                  ? "Student selection is active. Pause drive in Tab 2 to edit subjects."
+                                                !isGroupDriveEstablished
+                                                  ? "PE Selection Drive is not added. Establish drive in Tab 2 first to edit subjects and seats."
+                                                  : isGroupDriveActive
+                                                  ? "Drive is active for selection. Pause drive in Tab 2 to edit subjects and seats."
                                                   : "Edit Subject & Seats"
                                               }
                                             >
@@ -2885,19 +3781,21 @@ Nadimpalli Satyanarayana Raju Institute of Technology (NSRIT)`
                                               <span>Edit</span>
                                             </button>
                                             <button
-                                              disabled={isGroupDriveActive}
+                                              disabled={!isGroupDriveEstablished || isGroupDriveActive}
                                               onClick={() => {
-                                                if (isGroupDriveActive) return;
+                                                if (!isGroupDriveEstablished || isGroupDriveActive) return;
                                                 handleDeleteSubject(s.id);
                                               }}
                                               className={`p-1.5 rounded-lg transition-colors ${
-                                                isGroupDriveActive
+                                                (!isGroupDriveEstablished || isGroupDriveActive)
                                                   ? 'text-gray-300 cursor-not-allowed opacity-40'
                                                   : 'text-gray-400 hover:text-red-700 hover:bg-red-50'
                                               }`}
                                               title={
-                                                isGroupDriveActive
-                                                  ? "Student selection is active. Pause drive in Tab 2 to delete subjects."
+                                                !isGroupDriveEstablished
+                                                  ? "PE Selection Drive is not added. Establish drive in Tab 2 first to delete subjects."
+                                                  : isGroupDriveActive
+                                                  ? "Drive is active for selection. Pause drive in Tab 2 to delete subjects."
                                                   : "Delete Subject"
                                               }
                                             >
@@ -2920,7 +3818,7 @@ Nadimpalli Satyanarayana Raju Institute of Technology (NSRIT)`
                                   <div className="flex items-center gap-2">
                                     <span className="text-[11px] font-bold text-amber-800 flex items-center gap-1">
                                       <Lock className="w-3.5 h-3.5 text-amber-600" />
-                                      Offering frozen during active selection.
+                                      Drive is active for selection • Offerings and seats are frozen.
                                     </span>
                                     <button
                                       type="button"
@@ -2928,6 +3826,27 @@ Nadimpalli Satyanarayana Raju Institute of Technology (NSRIT)`
                                       className="text-xs font-bold text-blue-700 hover:text-blue-900 hover:underline"
                                     >
                                       Pause Drive in Tab 2 &rarr;
+                                    </button>
+                                  </div>
+                                ) : !isGroupDriveEstablished ? (
+                                  <div className="flex items-center gap-2">
+                                    <span className="text-[11px] font-bold text-amber-700 flex items-center gap-1">
+                                      <AlertCircle className="w-3.5 h-3.5 text-amber-500" />
+                                      PE Selection Drive is not added. Establish drive first to add subjects.
+                                    </span>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setPeDriveModalDefaults({
+                                          batch: group.batch,
+                                          semester: group.semester,
+                                          elective_number: group.elective_number
+                                        });
+                                        setPeDriveModalOpen(true);
+                                      }}
+                                      className="text-xs font-bold text-blue-700 hover:text-blue-900 hover:underline"
+                                    >
+                                      Establish PE Drive &rarr;
                                     </button>
                                   </div>
                                 ) : (
@@ -2998,9 +3917,9 @@ Nadimpalli Satyanarayana Raju Institute of Technology (NSRIT)`
                     onClick={() => {
                       setOfferElectiveType('OE');
                       setOfferElectiveDefaults({
-                        batch: oeCurriculumBatches[0] || (oeSubjectFilters.batch !== 'ALL' ? oeSubjectFilters.batch : ''),
-                        semester: 5,
-                        elective_number: 1
+                        batch: '',
+                        semester: '',
+                        elective_number: ''
                       });
                       setOfferElectiveModalOpen(true);
                     }}
@@ -3087,7 +4006,8 @@ Nadimpalli Satyanarayana Raju Institute of Technology (NSRIT)`
 
                       const groupAdminWindow = adminWindows.find(w => 
                         normalizeBatch(w.batch) === normalizeBatch(group.batch) && 
-                        Number(w.semester) === Number(group.semester)
+                        Number(w.semester) === Number(group.semester) &&
+                        Number(w.elective_number || 1) === Number(group.elective_number || 1)
                       );
                       const isGroupAdminActive = groupAdminWindow?.status === 'ACTIVE';
                       const isGroupAdminEstablished = !!groupAdminWindow;
@@ -3120,12 +4040,12 @@ Nadimpalli Satyanarayana Raju Institute of Technology (NSRIT)`
                                   ) : isGroupAdminEstablished ? (
                                     <span className="px-2.5 py-0.5 rounded-full bg-emerald-100 border border-emerald-300 text-emerald-800 font-bold text-[10px] flex items-center gap-1">
                                       <CheckCircle2 className="w-3 h-3 text-emerald-600" />
-                                      ADMIN DRIVE READY
+                                      SETUP MODE (READY)
                                     </span>
                                   ) : (
                                     <span className="px-2.5 py-0.5 rounded-full bg-amber-50 border border-amber-200 text-amber-800 font-bold text-[10px] flex items-center gap-1">
                                       <AlertCircle className="w-3 h-3 text-amber-600" />
-                                      ADMIN DRIVE REQUIRED
+                                      DRIVE NOT ADDED
                                     </span>
                                   )}
                                 </div>
@@ -3212,31 +4132,43 @@ Nadimpalli Satyanarayana Raju Institute of Technology (NSRIT)`
                                             <button
                                               disabled={!isGroupAdminEstablished || isGroupAdminActive}
                                               onClick={() => {
+                                                if (!isGroupAdminEstablished || isGroupAdminActive) return;
                                                 setEditingSubject(s);
                                                 setSubjectModalType('OE');
                                                 setSubjectModalOpen(true);
                                               }}
-                                              className="px-2.5 py-1 text-xs font-bold text-purple-700 bg-purple-50 hover:bg-purple-100 border border-purple-200 rounded-lg flex items-center gap-1 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                                              className={`px-2.5 py-1 text-xs font-bold rounded-lg flex items-center gap-1 transition-colors ${
+                                                (!isGroupAdminEstablished || isGroupAdminActive)
+                                                  ? 'text-gray-400 bg-gray-100 border border-gray-200 cursor-not-allowed opacity-60'
+                                                  : 'text-purple-700 bg-purple-50 hover:bg-purple-100 border border-purple-200'
+                                              }`}
                                               title={
                                                 !isGroupAdminEstablished
-                                                  ? "Admin must configure OE drive in Admin Portal first"
+                                                  ? "OE Selection Drive is not added. College Admin must create OE drive in Setup Mode before subjects and seats can be edited."
                                                   : isGroupAdminActive
-                                                  ? "Student selection is active. Contact Admin to pause drive before editing."
+                                                  ? "Drive is active for selection. Offerings and seats are frozen."
                                                   : "Edit Subject & Seats"
                                               }
                                             >
-                                              <Edit className="w-3.5 h-3.5" />
+                                              {isGroupAdminActive ? <Lock className="w-3.5 h-3.5 text-gray-400" /> : <Edit className="w-3.5 h-3.5" />}
                                               <span>Edit</span>
                                             </button>
                                             <button
                                               disabled={!isGroupAdminEstablished || isGroupAdminActive}
-                                              onClick={() => handleDeleteSubject(s.id)}
-                                              className="p-1.5 text-gray-400 hover:text-red-700 hover:bg-red-50 rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                                              onClick={() => {
+                                                if (!isGroupAdminEstablished || isGroupAdminActive) return;
+                                                handleDeleteSubject(s.id);
+                                              }}
+                                              className={`p-1.5 rounded-lg transition-colors ${
+                                                (!isGroupAdminEstablished || isGroupAdminActive)
+                                                  ? 'text-gray-300 cursor-not-allowed opacity-40'
+                                                  : 'text-gray-400 hover:text-red-700 hover:bg-red-50'
+                                              }`}
                                               title={
                                                 !isGroupAdminEstablished
-                                                  ? "Admin must configure OE drive in Admin Portal first"
+                                                  ? "OE Selection Drive is not added. College Admin must create OE drive first to delete subjects."
                                                   : isGroupAdminActive
-                                                  ? "Student selection is active. Contact Admin to pause drive before deleting."
+                                                  ? "Drive is active for selection. Offerings and seats are frozen."
                                                   : "Delete Subject"
                                               }
                                             >
@@ -3250,29 +4182,45 @@ Nadimpalli Satyanarayana Raju Institute of Technology (NSRIT)`
                                 </table>
                               </div>
 
-                              {/* Card Footer with Quick Add Subject */}
-                              <div className="p-3 bg-gray-50/70 border-t border-gray-100 flex items-center justify-between">
+                              {/* Card Footer with Quick Add Subject or Active Freeze Notice */}
+                              <div className="p-3.5 bg-gray-50/80 border-t border-gray-100 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
                                 <span className="text-[11px] text-gray-500 font-medium">
                                   Configured for Batch {group.batch} (Sem {group.semester})
                                 </span>
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    setEditingSubject(null);
-                                    setSubjectModalType('OE');
-                                    setSubjectModalDefaults({
-                                      batch: group.batch,
-                                      semester: group.semester,
-                                      elective_number: group.elective_number,
-                                      regulation: group.regulation || 'AR23'
-                                    });
-                                    setSubjectModalOpen(true);
-                                  }}
-                                  className="px-3 py-1.5 rounded-xl bg-white hover:bg-purple-50 border border-gray-300 hover:border-purple-300 text-purple-700 text-xs font-bold flex items-center gap-1.5 transition-colors shadow-2xs"
-                                >
-                                  <Plus className="w-3.5 h-3.5" />
-                                  <span>+ Add Course to this Offering</span>
-                                </button>
+                                {isGroupAdminActive ? (
+                                  <div className="flex items-center gap-2">
+                                    <span className="text-[11px] font-bold text-amber-800 flex items-center gap-1">
+                                      <Lock className="w-3.5 h-3.5 text-amber-600" />
+                                      Drive is active for selection • Offerings and seats are frozen.
+                                    </span>
+                                  </div>
+                                ) : !isGroupAdminEstablished ? (
+                                  <div className="flex items-center gap-2">
+                                    <span className="text-[11px] font-bold text-amber-700 flex items-center gap-1">
+                                      <AlertCircle className="w-3.5 h-3.5 text-amber-500" />
+                                      OE Selection Drive is not added. College Admin must create OE drive in Setup Mode before courses can be added.
+                                    </span>
+                                  </div>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setEditingSubject(null);
+                                      setSubjectModalType('OE');
+                                      setSubjectModalDefaults({
+                                        batch: group.batch,
+                                        semester: group.semester,
+                                        elective_number: group.elective_number,
+                                        regulation: group.regulation || 'AR23'
+                                      });
+                                      setSubjectModalOpen(true);
+                                    }}
+                                    className="px-3 py-1.5 rounded-xl bg-white hover:bg-purple-50 border border-gray-300 hover:border-purple-300 text-purple-700 text-xs font-bold flex items-center gap-1.5 transition-colors shadow-2xs"
+                                  >
+                                    <Plus className="w-3.5 h-3.5" />
+                                    <span>+ Add Course to this Offering</span>
+                                  </button>
+                                )}
                               </div>
                             </div>
                           )}
@@ -3362,7 +4310,7 @@ Nadimpalli Satyanarayana Raju Institute of Technology (NSRIT)`
                     className="bg-transparent text-xs font-bold text-gray-900 focus:outline-none cursor-pointer"
                   >
                     <option value="ALL">All Batches</option>
-                    {availableBatches.map(b => (
+                    {(studentBatches.length > 0 ? studentBatches : availableBatches).map(b => (
                       <option key={b} value={b}>Batch {b}</option>
                     ))}
                   </select>
@@ -3646,7 +4594,7 @@ Nadimpalli Satyanarayana Raju Institute of Technology (NSRIT)`
                     className="bg-transparent text-xs font-bold text-gray-900 focus:outline-none cursor-pointer"
                   >
                     <option value="ALL">All Batches</option>
-                    {availableBatches.map(b => (
+                    {(studentBatches.length > 0 ? studentBatches : availableBatches).map(b => (
                       <option key={b} value={b}>Batch {b}</option>
                     ))}
                   </select>
@@ -4571,7 +5519,20 @@ Nadimpalli Satyanarayana Raju Institute of Technology (NSRIT)`
 
               <select
                 value={filters.elective_number}
-                onChange={(e) => setFilters({ ...filters, elective_number: e.target.value })}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  setFilters(prev => {
+                    let nextSubj = prev.subject_id;
+                    if (val !== 'ALL' && nextSubj !== 'ALL') {
+                      const allSubjs = [...peSubjects, ...oeSubjects];
+                      const found = allSubjs.find(s => s.id === nextSubj);
+                      if (found && Number(found.elective_number || 1) !== Number(val)) {
+                        nextSubj = 'ALL';
+                      }
+                    }
+                    return { ...prev, elective_number: val, subject_id: nextSubj };
+                  });
+                }}
                 className="px-3 py-2 rounded-xl border border-purple-300 text-xs font-bold bg-purple-50 text-purple-900"
               >
                 <option value="ALL">All Elective Numbers</option>
@@ -4613,16 +5574,29 @@ Nadimpalli Satyanarayana Raju Institute of Technology (NSRIT)`
 
               <select
                 value={filters.batch}
-                onChange={(e) => setFilters({ ...filters, batch: e.target.value, section: 'ALL' })}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  setFilters(prev => {
+                    let nextSubj = prev.subject_id;
+                    if (val !== 'ALL' && nextSubj !== 'ALL') {
+                      const allSubjs = [...peSubjects, ...oeSubjects];
+                      const found = allSubjs.find(s => s.id === nextSubj);
+                      if (found && found.admitted_batch && normalizeBatch(found.admitted_batch) !== normalizeBatch(val)) {
+                        nextSubj = 'ALL';
+                      }
+                    }
+                    return { ...prev, batch: val, section: 'ALL', subject_id: nextSubj };
+                  });
+                }}
                 className="px-3 py-2 rounded-xl border border-gray-300 text-xs font-bold bg-white text-gray-800"
               >
                 <option value="ALL">All Batches</option>
-                {availableBatches.map(b => (
+                {(studentBatches.length > 0 ? studentBatches : availableBatches).map(b => (
                   <option key={b} value={b}>Batch {b}</option>
                 ))}
               </select>
 
-              {/* Subject-Wise Filter Dropdown */}
+              {/* Subject-Wise Filter Dropdown (Filtered by selected Elective Number & Type) */}
               <select
                 value={filters.subject_id}
                 onChange={(e) => setFilters({ ...filters, subject_id: e.target.value })}
@@ -4634,9 +5608,16 @@ Nadimpalli Satyanarayana Raju Institute of Technology (NSRIT)`
                   : filters.elective_type === 'OE'
                     ? oeSubjects
                     : [...peSubjects, ...oeSubjects]
-                ).map(s => (
+                )
+                .filter(s => {
+                  if (filters.elective_type !== 'ALL' && s.elective_type !== filters.elective_type) return false;
+                  if (filters.elective_number !== 'ALL' && Number(s.elective_number || 1) !== Number(filters.elective_number)) return false;
+                  if (filters.batch !== 'ALL' && s.admitted_batch && normalizeBatch(s.admitted_batch) !== normalizeBatch(filters.batch)) return false;
+                  return true;
+                })
+                .map(s => (
                   <option key={s.id} value={s.id}>
-                    {s.subject_code} - {s.subject_name}
+                    {s.subject_code} - {s.subject_name} ({s.elective_type || 'PE'}-{s.elective_number || 1})
                   </option>
                 ))}
               </select>
@@ -4718,23 +5699,61 @@ Nadimpalli Satyanarayana Raju Institute of Technology (NSRIT)`
 
           </div>
 
-          {/* Allotment Records Table */}
+          {/* Allotment Records Table with 100-Row Pagination */}
           <div className="bg-white rounded-3xl border border-gray-200 shadow-card overflow-hidden">
-            <div className="p-5 border-b border-gray-100 flex items-center justify-between">
+            <div className="p-5 border-b border-gray-100 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
               <div>
                 <h3 className="text-base font-bold text-gray-900 font-display">
                   Official Allotment Master List
                 </h3>
                 <p className="text-xs text-gray-500">
-                  Showing {allotments.length} processed student records. Click "Modify" to re-assign or "Reset" to unlock selection for student.
+                  Showing {allotments.length} processed student records (100 rows per page). Click "Modify" to re-assign or "Reset" to unlock selection for student.
                 </p>
               </div>
+
+              {/* Top Pagination Arrows & Counter */}
+              <div className="flex items-center gap-2 self-start sm:self-auto">
+                <button
+                  type="button"
+                  onClick={() => setAllotmentPage(p => Math.max(1, p - 1))}
+                  disabled={currentAllotmentPage <= 1}
+                  className="px-3 py-1.5 rounded-xl border border-gray-300 bg-white font-bold text-xs text-gray-700 hover:bg-gray-100 disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1 shadow-2xs transition-colors"
+                  title="View Previous 100 rows"
+                >
+                  <ChevronLeft className="w-4 h-4" />
+                  <span>Previous 100</span>
+                </button>
+                <span className="px-3 py-1.5 rounded-xl bg-crimson-50 text-crimson-800 font-bold text-xs border border-crimson-200">
+                  Page {currentAllotmentPage} of {totalAllotmentPages}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setAllotmentPage(p => Math.min(totalAllotmentPages, p + 1))}
+                  disabled={currentAllotmentPage >= totalAllotmentPages}
+                  className="px-3 py-1.5 rounded-xl border border-gray-300 bg-white font-bold text-xs text-gray-700 hover:bg-gray-100 disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1 shadow-2xs transition-colors"
+                  title="View Next 100 rows"
+                >
+                  <span>Next 100</span>
+                  <ChevronRight className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+
+            {/* Quick Status Subhead */}
+            <div className="px-5 py-2.5 bg-gray-50/80 border-b border-gray-100 text-xs text-gray-600 font-medium flex items-center justify-between">
+              <span>
+                Displaying rows <strong className="text-gray-900">{allotments.length > 0 ? (currentAllotmentPage - 1) * ALLOTMENT_PAGE_SIZE + 1 : 0}</strong>–<strong className="text-gray-900">{Math.min(currentAllotmentPage * ALLOTMENT_PAGE_SIZE, allotments.length)}</strong> of <strong className="text-gray-900">{allotments.length}</strong> total records
+              </span>
+              <span className="text-[11px] text-gray-500 font-mono">
+                100 rows / page
+              </span>
             </div>
 
             <div className="overflow-x-auto">
               <table className="w-full text-xs text-left">
                 <thead className="bg-gray-50 text-gray-600 border-b border-gray-200 uppercase font-bold tracking-wider">
                   <tr>
+                    <th className="px-3 py-3 text-center w-12">S.No</th>
                     <th className="px-4 py-3">Elective</th>
                     <th className="px-4 py-3">Student Email</th>
                     <th className="px-4 py-3">Roll Number</th>
@@ -4749,22 +5768,31 @@ Nadimpalli Satyanarayana Raju Institute of Technology (NSRIT)`
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100">
-                  {allotments.map((item) => {
+                  {paginatedAllotments.map((item, idx) => {
+                    const rowNumber = (currentAllotmentPage - 1) * ALLOTMENT_PAGE_SIZE + idx + 1;
+                    const displaySubjName = item.subjectName || item.subject_name || 'Allotted Subject';
+                    const displaySubjCode = item.subjectCode || item.subject_code || '';
+                    const displayRoll = item.rollNumber || item.roll_number || item.student_roll || 'N/A';
+                    const displayName = item.studentName || item.student_name || 'Student';
+                    const displayEmail = item.studentEmail || item.student_email || 'N/A';
+                    const displayBranch = item.branch || item.student_branch || '—';
+
                     const subjectDisplay = item.status === 'ALLOTTED'
-                      ? (item.subjectCode && item.subjectCode !== 'N/A' ? `${item.subjectCode} - ${item.subjectName}` : (item.subjectName || 'Allotted'))
-                      : (item.status === 'WAITLISTED' ? 'WAITLISTED (No Vacancy)' : (item.subjectName || '—'));
+                      ? (displaySubjCode && displaySubjCode !== 'N/A' ? `${displaySubjCode} - ${displaySubjName}` : displaySubjName)
+                      : (item.status === 'WAITLISTED' ? 'WAITLISTED (No Vacancy)' : (displaySubjName || '—'));
 
                     return (
                       <tr key={item.id} className="hover:bg-gray-50/80 transition-colors">
+                        <td className="px-3 py-3 text-center font-mono font-bold text-gray-500">{rowNumber}</td>
                         <td className="px-4 py-3">
                           <span className="px-2 py-0.5 rounded bg-purple-100 text-purple-800 font-bold font-mono text-[10px] border border-purple-200">
                             {item.elective_type}-{item.elective_number || 1}
                           </span>
                         </td>
-                        <td className="px-4 py-3 font-semibold text-gray-900">{item.studentEmail}</td>
-                        <td className="px-4 py-3 font-mono font-bold text-gray-800">{item.rollNumber}</td>
-                        <td className="px-4 py-3 font-medium text-gray-900">{item.studentName}</td>
-                        <td className="px-4 py-3 font-medium text-gray-700">{item.branch} - Sec {item.section} (Sem {item.semester})</td>
+                        <td className="px-4 py-3 font-semibold text-gray-900">{displayEmail}</td>
+                        <td className="px-4 py-3 font-mono font-bold text-gray-800">{displayRoll}</td>
+                        <td className="px-4 py-3 font-medium text-gray-900">{displayName}</td>
+                        <td className="px-4 py-3 font-medium text-gray-700">{displayBranch} - Sec {item.section || 'A'} (Sem {item.semester || 5})</td>
                         <td className="px-4 py-3">
                           <span className={`px-2 py-0.5 rounded font-bold text-[10px] ${
                             item.elective_type === 'PE' ? 'bg-crimson-100 text-crimson-800' : 'bg-blue-100 text-blue-800'
@@ -4780,7 +5808,12 @@ Nadimpalli Satyanarayana Raju Institute of Technology (NSRIT)`
                           )}
                         </td>
                         <td className="px-4 py-3 text-center">
-                          {item.priority_selected ? (
+                          {item.is_auto_allocated ? (
+                            <span className="px-2 py-0.5 rounded bg-indigo-100 text-indigo-900 font-bold text-[10px] border border-indigo-200 inline-flex items-center gap-1 shadow-sm">
+                              <Wand2 className="w-3 h-3 text-indigo-600" />
+                              Auto Allocated
+                            </span>
+                          ) : item.priority_selected ? (
                             <span className="px-2 py-0.5 rounded bg-amber-100 text-amber-900 font-bold text-[10px]">
                               Priority {item.priority_selected}
                             </span>
@@ -4798,29 +5831,29 @@ Nadimpalli Satyanarayana Raju Institute of Technology (NSRIT)`
                         <td className="px-4 py-3 text-gray-500 text-[11px]">
                           {item.allotted_at ? new Date(item.allotted_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : 'N/A'}
                         </td>
-                        <td className="px-4 py-3 text-right space-x-1">
+                        <td className="px-4 py-2 text-right whitespace-nowrap">
                           {item.elective_type === 'PE' ? (
-                            <>
+                            <div className="flex flex-col items-end gap-1">
                               <button
                                 onClick={() => {
                                   setSelectedAllotmentForOverride(item);
                                   setOverrideModalOpen(true);
                                 }}
-                                className="px-2.5 py-1 text-xs font-bold text-crimson-700 bg-crimson-50 hover:bg-crimson-100 rounded-lg transition-colors inline-flex items-center gap-1"
+                                className="w-20 justify-center px-2 py-0.5 text-[11px] font-bold text-crimson-700 bg-crimson-50 hover:bg-crimson-100 rounded-lg transition-colors inline-flex items-center gap-1 shadow-2xs"
                                 title="Manually modify PE allotted subject"
                               >
-                                <Edit3 className="w-3.5 h-3.5" />
+                                <Edit3 className="w-3 h-3" />
                                 <span>Modify</span>
                               </button>
                               <button
                                 onClick={() => handleUnlockSelection(item.student_id, item.elective_type)}
-                                className="px-2.5 py-1 text-xs font-bold text-amber-800 bg-amber-50 hover:bg-amber-100 rounded-lg transition-colors inline-flex items-center gap-1"
+                                className="w-20 justify-center px-2 py-0.5 text-[11px] font-bold text-amber-800 bg-amber-50 hover:bg-amber-100 rounded-lg transition-colors inline-flex items-center gap-1 shadow-2xs"
                                 title="Reset choice and unlock preference form for this student"
                               >
-                                <Unlock className="w-3.5 h-3.5 text-amber-600" />
+                                <Unlock className="w-3 h-3 text-amber-600" />
                                 <span>Reset</span>
                               </button>
-                            </>
+                            </div>
                           ) : (
                             <span className="px-2.5 py-1 rounded-lg bg-gray-100 text-gray-500 font-semibold text-[10px] inline-flex items-center gap-1">
                               <ShieldCheck className="w-3 h-3 text-gray-400" />
@@ -4833,13 +5866,43 @@ Nadimpalli Satyanarayana Raju Institute of Technology (NSRIT)`
                   })}
                   {allotments.length === 0 && (
                     <tr>
-                      <td colSpan="11" className="py-12 text-center text-gray-400">
+                      <td colSpan="12" className="py-12 text-center text-gray-400">
                         No allotment records found matching the current filters.
                       </td>
                     </tr>
                   )}
                 </tbody>
               </table>
+            </div>
+
+            {/* Bottom Pagination Bar */}
+            <div className="p-4 bg-gray-50 border-t border-gray-100 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
+              <div className="text-gray-600 font-medium">
+                Showing <strong className="text-gray-900">{allotments.length > 0 ? (currentAllotmentPage - 1) * ALLOTMENT_PAGE_SIZE + 1 : 0}</strong> to <strong className="text-gray-900">{Math.min(currentAllotmentPage * ALLOTMENT_PAGE_SIZE, allotments.length)}</strong> of <strong className="text-gray-900">{allotments.length}</strong> allotments
+              </div>
+              <div className="flex items-center gap-2 self-end sm:self-auto">
+                <button
+                  type="button"
+                  onClick={() => setAllotmentPage(p => Math.max(1, p - 1))}
+                  disabled={currentAllotmentPage <= 1}
+                  className="px-3 py-1.5 rounded-xl border border-gray-300 bg-white font-bold text-xs text-gray-700 hover:bg-gray-100 disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1 shadow-2xs transition-colors"
+                >
+                  <ChevronLeft className="w-4 h-4" />
+                  <span>Previous 100</span>
+                </button>
+                <span className="px-3 py-1.5 rounded-xl bg-crimson-50 text-crimson-800 font-bold text-xs border border-crimson-200">
+                  Page {currentAllotmentPage} of {totalAllotmentPages}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setAllotmentPage(p => Math.min(totalAllotmentPages, p + 1))}
+                  disabled={currentAllotmentPage >= totalAllotmentPages}
+                  className="px-3 py-1.5 rounded-xl border border-gray-300 bg-white font-bold text-xs text-gray-700 hover:bg-gray-100 disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1 shadow-2xs transition-colors"
+                >
+                  <span>Next 100</span>
+                  <ChevronRight className="w-4 h-4" />
+                </button>
+              </div>
             </div>
           </div>
 
@@ -4933,9 +5996,11 @@ Nadimpalli Satyanarayana Raju Institute of Technology (NSRIT)`
         onClose={() => setPeDriveModalOpen(false)}
         onSave={handleSavePEDrive}
         coordinatorBranch={coordinatorBranch}
-        availableBatches={availableBatches}
+        availableBatches={studentBatches.length > 0 ? studentBatches : availableBatches}
+        curriculumList={curriculumList}
         initialBatch={peDriveModalDefaults.batch}
         initialSemester={peDriveModalDefaults.semester}
+        initialElectiveNumber={peDriveModalDefaults.elective_number}
       />
 
       {/* 3.5 Offer Elective from Curriculum Modal */}
@@ -4966,7 +6031,8 @@ Nadimpalli Satyanarayana Raju Institute of Technology (NSRIT)`
           const elNumVal = (typeof batchOrObj === 'object' ? batchOrObj?.elective_number : 1) || 1;
           setPeDriveModalDefaults({
             batch: normalizeBatch(batchVal),
-            semester: Number(semVal)
+            semester: Number(semVal),
+            elective_number: Number(elNumVal)
           });
           setResumeOfferingAfterDrive({
             batch: normalizeBatch(batchVal),
@@ -5044,13 +6110,320 @@ Nadimpalli Satyanarayana Raju Institute of Technology (NSRIT)`
         eligibleSubjects={selectedAllotmentForOverride?.elective_type === 'OE' ? oeSubjects : peSubjects}
       />
 
-      {/* 10. PRINT-ONLY COMPONENT */}
+      {/* 10. Reveal / Hide Allotments Password Confirmation Modal */}
+      <Modal
+        isOpen={revealModalOpen}
+        onClose={() => {
+          if (!revealLoading) {
+            setRevealModalOpen(false);
+            setRevealPassword('');
+            setRevealError('');
+          }
+        }}
+        title={selectedDriveForReveal?.allotment_revealed ? "Hide Allotment Results from Students" : "Reveal Allotment Results to Students"}
+        maxWidth="max-w-md"
+      >
+        <form onSubmit={handleConfirmReveal} className="space-y-4">
+          <div className="p-4 rounded-xl bg-gray-50 border border-gray-200">
+            <div className="flex items-start gap-3">
+              <div className={`p-2 rounded-lg ${selectedDriveForReveal?.allotment_revealed ? 'bg-amber-100 text-amber-700' : 'bg-emerald-100 text-emerald-700'}`}>
+                {selectedDriveForReveal?.allotment_revealed ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
+              </div>
+              <div>
+                <h4 className="text-sm font-bold text-gray-900">{selectedDriveForReveal?.title}</h4>
+                <p className="text-xs text-gray-500 mt-1">
+                  Batch {selectedDriveForReveal?.batch} • Semester {selectedDriveForReveal?.semester} • {selectedDriveForReveal?.branch}
+                </p>
+                <p className="text-xs text-gray-600 mt-2">
+                  {selectedDriveForReveal?.allotment_revealed 
+                    ? "Hiding allotments will immediately mask subject details and memos on the student portal. Students will see 'Pending Publication'."
+                    : "Revealing allotments will immediately publish all allotted subjects and memos to students in this batch."}
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <div>
+            <label className="block text-xs font-bold text-gray-700 uppercase tracking-wider mb-1.5 flex items-center gap-1.5">
+              <KeyRound className="w-3.5 h-3.5 text-crimson-600" />
+              <span>Confirm Coordinator Password</span>
+            </label>
+            <input
+              type="password"
+              required
+              value={revealPassword}
+              onChange={(e) => setRevealPassword(e.target.value)}
+              placeholder="Enter your account password"
+              className="w-full px-3.5 py-2.5 rounded-xl border border-gray-300 text-sm focus:ring-2 focus:ring-crimson-500 focus:border-crimson-500 outline-none"
+              autoFocus
+            />
+            <p className="text-[11px] text-gray-500 mt-1">
+              Security verification required to change publication state.
+            </p>
+          </div>
+
+          {revealError && (
+            <div className="p-3 rounded-xl bg-red-50 border border-red-200 text-red-700 text-xs flex items-center gap-2">
+              <AlertCircle className="w-4 h-4 flex-shrink-0 text-red-600" />
+              <span>{revealError}</span>
+            </div>
+          )}
+
+          <div className="flex justify-end gap-2 pt-3 border-t border-gray-100">
+            <button
+              type="button"
+              disabled={revealLoading}
+              onClick={() => setRevealModalOpen(false)}
+              className="px-4 py-2 text-xs font-semibold text-gray-600 hover:bg-gray-100 rounded-xl transition-colors"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              disabled={revealLoading || !revealPassword}
+              className={`px-5 py-2 text-xs font-bold text-white rounded-xl shadow-sm transition-colors flex items-center gap-2 ${
+                selectedDriveForReveal?.allotment_revealed
+                  ? 'bg-amber-600 hover:bg-amber-700 disabled:bg-gray-300'
+                  : 'bg-emerald-600 hover:bg-emerald-700 disabled:bg-gray-300'
+              }`}
+            >
+              {revealLoading ? (
+                <>
+                  <RotateCw className="w-3.5 h-3.5 animate-spin" />
+                  <span>Verifying...</span>
+                </>
+              ) : (
+                <>
+                  {selectedDriveForReveal?.allotment_revealed ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                  <span>{selectedDriveForReveal?.allotment_revealed ? "Confirm & Hide" : "Confirm & Reveal"}</span>
+                </>
+              )}
+            </button>
+          </div>
+        </form>
+      </Modal>
+
+      {/* 11. Edit Due Date / Selection Deadline Modal */}
+      <Modal
+        isOpen={dueDateModalOpen}
+        onClose={() => {
+          if (!dueDateLoading) {
+            setDueDateModalOpen(false);
+            setDueDateError('');
+          }
+        }}
+        title="Set Selection Due Date & Schedule"
+        maxWidth="max-w-md"
+      >
+        <form onSubmit={handleSaveDueDate} className="space-y-4">
+          <div className="p-4 rounded-xl bg-gray-50 border border-gray-200">
+            <h4 className="text-sm font-bold text-gray-900">{selectedDriveForDueDate?.title}</h4>
+            <p className="text-xs text-gray-500 mt-1">
+              Batch {selectedDriveForDueDate?.batch} • Semester {selectedDriveForDueDate?.semester}
+            </p>
+            <p className="text-xs text-gray-600 mt-2">
+              Set a deadline for students to submit and lock their elective preferences. After this time, preference submission will automatically pause/expire for students.
+            </p>
+          </div>
+
+          <div>
+            <label className="block text-xs font-bold text-gray-700 uppercase tracking-wider mb-1.5 flex items-center gap-1.5">
+              <Clock className="w-3.5 h-3.5 text-crimson-600" />
+              <span>Selection Deadline (Due Date & Time)</span>
+            </label>
+            <input
+              type="datetime-local"
+              value={newDriveDueDate}
+              onChange={(e) => setNewDriveDueDate(e.target.value)}
+              className="w-full px-3.5 py-2.5 rounded-xl border border-gray-300 text-sm focus:ring-2 focus:ring-crimson-500 focus:border-crimson-500 outline-none"
+            />
+            <div className="flex justify-between items-center mt-1.5">
+              <p className="text-[11px] text-gray-500">
+                Leave blank for no deadline.
+              </p>
+              {newDriveDueDate && (
+                <button
+                  type="button"
+                  onClick={() => setNewDriveDueDate('')}
+                  className="text-[11px] text-crimson-600 hover:underline font-semibold"
+                >
+                  Clear Deadline
+                </button>
+              )}
+            </div>
+          </div>
+
+          {dueDateError && (
+            <div className="p-3 rounded-xl bg-red-50 border border-red-200 text-red-700 text-xs flex items-center gap-2">
+              <AlertCircle className="w-4 h-4 flex-shrink-0 text-red-600" />
+              <span>{dueDateError}</span>
+            </div>
+          )}
+
+          <div className="flex justify-end gap-2 pt-3 border-t border-gray-100">
+            <button
+              type="button"
+              disabled={dueDateLoading}
+              onClick={() => setDueDateModalOpen(false)}
+              className="px-4 py-2 text-xs font-semibold text-gray-600 hover:bg-gray-100 rounded-xl transition-colors"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              disabled={dueDateLoading}
+              className="px-5 py-2 text-xs font-bold text-white bg-crimson-600 hover:bg-crimson-700 disabled:bg-gray-300 rounded-xl shadow-sm transition-colors flex items-center gap-2"
+            >
+              {dueDateLoading ? (
+                <>
+                  <RotateCw className="w-3.5 h-3.5 animate-spin" />
+                  <span>Saving...</span>
+                </>
+              ) : (
+                <>
+                  <Check className="w-3.5 h-3.5" />
+                  <span>Save Schedule</span>
+                </>
+              )}
+            </button>
+          </div>
+        </form>
+      </Modal>
+
+      {/* 12. Auto-Allocate / Reallocate Students Modal */}
+      <Modal
+        isOpen={autoAllocateModalOpen}
+        onClose={() => {
+          if (!autoAllocateLoading) {
+            setAutoAllocateModalOpen(false);
+            setAutoAllocatePassword('');
+            setAutoAllocateError('');
+            setAutoAllocateProgress(0);
+            setAutoAllocatePhase('');
+          }
+        }}
+        title="Auto Allocate / Reallocate Students"
+        maxWidth="max-w-lg"
+      >
+        <form onSubmit={handleConfirmAutoAllocate} className="space-y-4">
+          <div className="p-4 rounded-xl bg-indigo-50 border border-indigo-200">
+            <div className="flex items-start gap-3">
+              <div className="p-2 rounded-lg bg-indigo-100 text-indigo-700">
+                <Wand2 className="w-5 h-5" />
+              </div>
+              <div>
+                <h4 className="text-sm font-bold text-indigo-900">{selectedDriveForAutoAllocate?.title}</h4>
+                <p className="text-xs text-indigo-700 mt-1">
+                  Batch {selectedDriveForAutoAllocate?.batch} • Semester {selectedDriveForAutoAllocate?.semester} • {coordinatorBranch}
+                </p>
+                <div className="text-xs text-indigo-800 mt-2 space-y-1">
+                  <p>• <strong>Waitlist Reallocation:</strong> Previously waitlisted students are automatically reallocated if seat capacities were increased.</p>
+                  <p>• <strong>Section-Wise Distribution:</strong> Students who did not submit preferences are allocated <strong>section-wise (Section A, B, C...)</strong> into available vacancies.</p>
+                  <p>• <strong>Integrity Guaranteed:</strong> Student priority preferences and confirmed allotments are strictly preserved.</p>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {autoAllocateLoading ? (
+            <div className="p-5 rounded-2xl bg-amber-50 border-2 border-amber-400 space-y-4">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-black uppercase tracking-wider text-amber-900 flex items-center gap-1.5">
+                  <RotateCw className="w-4 h-4 animate-spin text-amber-700" />
+                  <span>Processing: {autoAllocateProgress}% Completed</span>
+                </span>
+                <span className="text-xs font-bold text-amber-800">{autoAllocateProgress}%</span>
+              </div>
+
+              {/* Animated Progress Bar */}
+              <div className="w-full bg-amber-200 rounded-full h-3 overflow-hidden">
+                <div 
+                  className="bg-gradient-to-r from-amber-600 via-indigo-600 to-emerald-600 h-3 rounded-full transition-all duration-300 ease-out"
+                  style={{ width: `${autoAllocateProgress}%` }}
+                />
+              </div>
+
+              <p className="text-xs text-amber-900 font-semibold italic text-center">
+                {autoAllocatePhase || 'Allocating and reallocating student quotas...'}
+              </p>
+
+              {/* Critical Notice */}
+              <div className="p-3.5 bg-red-100 border border-red-300 rounded-xl text-red-900 text-xs font-bold flex items-start gap-2.5">
+                <AlertCircle className="w-5 h-5 text-red-700 flex-shrink-0 mt-0.5" />
+                <div>
+                  <span className="block font-black uppercase text-[11px] text-red-800">Critical Notice — Please Do Not Exit!</span>
+                  <span>Automated allocation and reallocation is processing. Please <strong>DO NOT close the website, cancel, refresh, or exit this browser tab</strong> while processing.</span>
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div>
+              <label className="block text-xs font-bold text-gray-700 uppercase tracking-wider mb-1.5 flex items-center gap-1.5">
+                <KeyRound className="w-3.5 h-3.5 text-crimson-600" />
+                <span>Confirm Coordinator Password</span>
+              </label>
+              <input
+                type="password"
+                required
+                value={autoAllocatePassword}
+                onChange={(e) => setAutoAllocatePassword(e.target.value)}
+                placeholder="Enter your account password to authorize"
+                className="w-full px-3.5 py-2.5 rounded-xl border border-gray-300 text-sm focus:ring-2 focus:ring-crimson-500 focus:border-crimson-500 outline-none"
+                autoFocus
+              />
+              <p className="text-[11px] text-gray-500 mt-1">
+                Coordinator authorization is required to run automated allocation & reallocation.
+              </p>
+            </div>
+          )}
+
+          {autoAllocateError && (
+            <div className="p-3 rounded-xl bg-red-50 border border-red-200 text-red-700 text-xs flex items-center gap-2">
+              <AlertCircle className="w-4 h-4 flex-shrink-0 text-red-600" />
+              <span>{autoAllocateError}</span>
+            </div>
+          )}
+
+          <div className="flex justify-end gap-2 pt-3 border-t border-gray-100">
+            <button
+              type="button"
+              disabled={autoAllocateLoading}
+              onClick={() => setAutoAllocateModalOpen(false)}
+              className="px-4 py-2 text-xs font-semibold text-gray-600 hover:bg-gray-100 rounded-xl transition-colors disabled:opacity-40"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              disabled={autoAllocateLoading || !autoAllocatePassword}
+              className="px-5 py-2 text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 disabled:bg-gray-300 rounded-xl shadow-sm transition-colors flex items-center gap-2"
+            >
+              {autoAllocateLoading ? (
+                <>
+                  <RotateCw className="w-3.5 h-3.5 animate-spin" />
+                  <span>Processing ({autoAllocateProgress}%)...</span>
+                </>
+              ) : (
+                <>
+                  <Wand2 className="w-3.5 h-3.5" />
+                  <span>Execute Auto Allocate / Reallocate</span>
+                </>
+              )}
+            </button>
+          </div>
+        </form>
+      </Modal>
+
+      {/* PRINT-ONLY COMPONENT */}
       <PrintAllotmentView
-        records={printConfig.records && printConfig.records.length > 0 ? printConfig.records : allotments}
+        records={printConfig.records && printConfig.records.length > 0 ? printConfig.records : (paginatedAllotments.length > 0 ? paginatedAllotments : allotments)}
         reportType={printConfig.reportType}
         title={printConfig.title}
         subtitle={printConfig.subtitle}
         filters={printConfig.filters || filters}
+        currentPage={printConfig.currentPage || currentAllotmentPage}
+        pageSize={ALLOTMENT_PAGE_SIZE}
+        totalRecords={printConfig.records ? printConfig.records.length : allotments.length}
       />
 
     </div>
